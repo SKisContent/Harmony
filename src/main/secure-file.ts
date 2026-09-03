@@ -1,19 +1,60 @@
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
-import { safeStorage } from 'electron'
+import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { app, safeStorage } from 'electron'
 
-// Persist small secrets/snapshots with a self-describing header so a later run can
-// always read back what an earlier run wrote — even if safeStorage availability
-// flipped between the two runs (a real macOS-dev gotcha), and even for files
-// written by an earlier, header-less version of this code.
+// Persist small secrets with a self-describing header so a later run can always
+// read back what an earlier run wrote.
 //
-//   bytes 0..4 : "enc1\n"  -> rest is base64(ciphertext)
-//   bytes 0..5 : "plain\n" -> rest is utf8 plaintext
-//   otherwise  : legacy    -> try decrypt, else treat whole file as utf8
+//   "dev1\n"  -> base64(iv|tag|ciphertext), AES-256-GCM with a local key file
+//   "enc1\n"  -> base64(safeStorage ciphertext)          (OS keychain)
+//   "plain\n" -> utf8 plaintext
+//   otherwise -> legacy: try safeStorage, else treat whole file as utf8
+//
+// Why "dev1": an unsigned dev Electron on macOS keeps its safeStorage key in the
+// login Keychain, and the ACL is bound to the binary's ad-hoc signature. Running
+// it via automation or a re-signed/re-extracted binary makes Chromium mint a new
+// key, leaving every previously-encrypted file undecryptable. So in development
+// we encrypt with our own persistent key; packaged builds use the Keychain.
 
+const DEVBOX = 'dev1\n'
 const ENC = 'enc1\n'
 const PLAIN = 'plain\n'
 
+const useDevBox = (): boolean => !app.isPackaged
+
+function devKey(): Buffer {
+  const path = join(app.getPath('userData'), 'dev-secret.key')
+  if (existsSync(path)) return Buffer.from(readFileSync(path, 'utf8'), 'base64')
+  const key = randomBytes(32)
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, key.toString('base64'), { mode: 0o600 })
+  return key
+}
+
+function devEncrypt(value: string): string {
+  const iv = randomBytes(12)
+  const cipher = createCipheriv('aes-256-gcm', devKey(), iv)
+  const ct = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()])
+  return DEVBOX + Buffer.concat([iv, cipher.getAuthTag(), ct]).toString('base64')
+}
+
+function devDecrypt(body: string): string {
+  const raw = Buffer.from(body, 'base64')
+  const decipher = createDecipheriv('aes-256-gcm', devKey(), raw.subarray(0, 12))
+  decipher.setAuthTag(raw.subarray(12, 28))
+  return decipher.update(raw.subarray(28), undefined, 'utf8') + decipher.final('utf8')
+}
+
 export function writeSecure(path: string, value: string): void {
+  if (useDevBox()) {
+    try {
+      writeFileSync(path, devEncrypt(value), 'utf8')
+      return
+    } catch {
+      /* fall through */
+    }
+  }
   try {
     if (safeStorage.isEncryptionAvailable()) {
       writeFileSync(path, ENC + safeStorage.encryptString(value).toString('base64'), 'utf8')
@@ -31,22 +72,40 @@ export function readSecure(path: string): string | null {
     const buf = readFileSync(path)
     const head = buf.subarray(0, 6).toString('latin1')
 
-    if (head.startsWith(ENC)) {
+    if (head.startsWith(DEVBOX)) {
       try {
-        return safeStorage.decryptString(Buffer.from(buf.subarray(ENC.length).toString('utf8'), 'base64'))
+        return devDecrypt(buf.subarray(DEVBOX.length).toString('utf8'))
       } catch (e) {
-        console.error('[secure-file] enc1 decrypt failed:', (e as Error).message)
+        console.error('[secure-file] dev1 decrypt failed, discarding:', (e as Error).message)
+        removeSecure(path)
         return null
       }
     }
+
+    if (head.startsWith(ENC)) {
+      try {
+        const plain = safeStorage.decryptString(
+          Buffer.from(buf.subarray(ENC.length).toString('utf8'), 'base64')
+        )
+        // opportunistically migrate to the dev box so it survives the next launch
+        if (useDevBox()) writeSecure(path, plain)
+        return plain
+      } catch (e) {
+        console.error('[secure-file] enc1 decrypt failed, discarding:', (e as Error).message)
+        removeSecure(path)
+        return null
+      }
+    }
+
     if (head.startsWith(PLAIN)) {
-      return buf.subarray(PLAIN.length).toString('utf8') || null
+      const s = buf.subarray(PLAIN.length).toString('utf8')
+      if (s && useDevBox()) writeSecure(path, s)
+      return s || null
     }
 
     // legacy header-less file: an encrypted Buffer, or raw utf8
     try {
       const dec = safeStorage.decryptString(buf)
-      // migrate it to the tagged format on the way out
       writeSecure(path, dec)
       return dec
     } catch {
