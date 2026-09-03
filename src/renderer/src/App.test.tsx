@@ -1,0 +1,258 @@
+import { act, render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { UnifiedState } from '@shared/types'
+import { App } from './App'
+import { makeState } from './test-fixtures'
+
+type Harmony = Window['harmony']
+
+function mountApp(state: UnifiedState = makeState()): {
+  harmony: Record<keyof Harmony, ReturnType<typeof vi.fn>>
+  push: (s: UnifiedState) => void
+} {
+  let listener: ((s: UnifiedState) => void) | null = null
+  const harmony = {
+    getState: vi.fn().mockResolvedValue(state),
+    onState: vi.fn((cb: (s: UnifiedState) => void) => {
+      listener = cb
+      return () => {}
+    }),
+    onMessage: vi.fn(() => () => {}),
+    login: vi.fn().mockResolvedValue({ ok: true }),
+    setToken: vi.fn().mockResolvedValue({ ok: true }),
+    logout: vi.fn().mockResolvedValue(undefined),
+    reconnect: vi.fn().mockResolvedValue(undefined),
+    getMessages: vi.fn().mockResolvedValue({ ok: true, messages: [] }),
+    sendMessage: vi.fn().mockResolvedValue({ ok: false }),
+    getThreads: vi.fn().mockResolvedValue({ ok: true, threads: [] }),
+    setPref: vi.fn().mockResolvedValue(undefined),
+    pinThread: vi.fn().mockResolvedValue(undefined),
+    setThreadPinMeta: vi.fn().mockResolvedValue(undefined),
+    reorderPinnedThreads: vi.fn().mockResolvedValue(undefined),
+    setCategoryLayout: vi.fn().mockResolvedValue(undefined),
+    reorderPinnedCategories: vi.fn().mockResolvedValue(undefined)
+  }
+  ;(window as unknown as { harmony: unknown }).harmony = harmony
+  render(<App />)
+  return {
+    harmony: harmony as unknown as Record<keyof Harmony, ReturnType<typeof vi.fn>>,
+    push: (s: UnifiedState) => act(() => listener?.(s))
+  }
+}
+
+beforeEach(() => localStorage.clear())
+afterEach(() => vi.restoreAllMocks())
+
+describe('sidebar mode switch', () => {
+  it('shows Servers, DMs and Pinned, and switches views', async () => {
+    const user = userEvent.setup()
+    mountApp()
+
+    // servers view is the default
+    expect(await screen.findByText('general')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Servers/ })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /^Pinned/ }))
+    // the pinned view lists the pinned thread and the tombstone
+    expect(screen.getByText('standup')).toBeInTheDocument()
+    expect(screen.getByText(/removed from Discord/i)).toBeInTheDocument()
+    expect(screen.queryByText('general')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /^DMs/ }))
+    expect(screen.getByText('No direct messages.')).toBeInTheDocument()
+  })
+})
+
+describe('FR-6 — hide empty categories', () => {
+  it('hides a category flagged hidden and reveals it via the affordance', async () => {
+    const user = userEvent.setup()
+    mountApp()
+
+    await screen.findByText('General')
+    // "Archive" is hidden by the empty-category rule
+    expect(screen.queryByText('Archive')).not.toBeInTheDocument()
+    const reveal = screen.getByRole('button', { name: /1 hidden category/ })
+    expect(reveal).toBeInTheDocument()
+
+    await user.click(reveal)
+    expect(screen.getByText('Archive')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Hide empty categories/ })).toBeInTheDocument()
+  })
+
+  it('reflects the pref in the checkbox and writes it on toggle', async () => {
+    const user = userEvent.setup()
+    const { harmony } = mountApp()
+
+    const cb = await screen.findByRole('checkbox', { name: /Hide empty categories/ })
+    expect(cb).toBeChecked()
+
+    await user.click(cb)
+    expect(harmony.setPref).toHaveBeenCalledWith('hideEmptyCategories', '0')
+  })
+
+  it('changes the empty-definition pref from the select', async () => {
+    const user = userEvent.setup()
+    const { harmony } = mountApp()
+
+    const select = await screen.findByRole('combobox', { name: /Empty means/ })
+    await user.selectOptions(select, 'no-unread')
+    expect(harmony.setPref).toHaveBeenCalledWith('emptyMode', 'no-unread')
+  })
+})
+
+describe('FR-7 — pin / collapse / reorder categories', () => {
+  it('pins a category', async () => {
+    const user = userEvent.setup()
+    const { harmony } = mountApp()
+
+    const head = (await screen.findByText('General')).closest('.cat-head')!
+    await user.click(within(head as HTMLElement).getByTitle('Pin category to top'))
+    expect(harmony.setCategoryLayout).toHaveBeenCalledWith('cat1', 'g1', { pinned: true })
+  })
+
+  it('collapses a category and stops rendering its channels', async () => {
+    const user = userEvent.setup()
+    const { harmony, push } = mountApp()
+
+    expect(await screen.findByText('general')).toBeInTheDocument()
+    await user.click(screen.getByText('General'))
+    expect(harmony.setCategoryLayout).toHaveBeenCalledWith('cat1', 'g1', { collapsed: true })
+
+    // simulate the store round-trip
+    const next = makeState()
+    next.guilds[0].categories[0].collapsed = true
+    push(next)
+    expect(screen.queryByText('general')).not.toBeInTheDocument()
+  })
+
+  it('renders pinned categories above unpinned ones, ordered by pinSortKey', async () => {
+    const s = makeState()
+    // two pinned categories (Archive pinned second) + keep General unpinned
+    s.guilds[0].categories[1] = {
+      ...s.guilds[0].categories[1],
+      name: 'Zeta',
+      hidden: false,
+      pinned: true,
+      pinSortKey: 1,
+      channels: [
+        {
+          id: 'c2',
+          guildId: 'g1',
+          name: 'zeta-chan',
+          type: 0,
+          parentId: 'cat2',
+          position: 0,
+          unread: false,
+          mentionCount: 0,
+          muted: false,
+          threads: []
+        }
+      ]
+    }
+    s.guilds[0].categories.push({
+      id: 'cat3',
+      name: 'Alpha',
+      position: 2,
+      recentActivity: '0',
+      channels: [
+        {
+          id: 'c3',
+          guildId: 'g1',
+          name: 'alpha-chan',
+          type: 0,
+          parentId: 'cat3',
+          position: 0,
+          unread: false,
+          mentionCount: 0,
+          muted: false,
+          threads: []
+        }
+      ],
+      pinned: true,
+      pinSortKey: 0,
+      collapsed: false,
+      hidden: false
+    })
+    mountApp(s)
+
+    const heads = (await screen.findAllByText(/^(Zeta|Alpha|General)$/)).map((n) => n.textContent)
+    // Alpha (key 0) then Zeta (key 1) — both pinned — then General (unpinned)
+    expect(heads).toEqual(['Alpha', 'Zeta', 'General'])
+  })
+
+  it('reorders pinned categories with the arrow controls', async () => {
+    const user = userEvent.setup()
+    const s = makeState()
+    s.guilds[0].categories[0].pinned = true
+    s.guilds[0].categories[0].pinSortKey = 0
+    s.guilds[0].categories[1] = {
+      ...s.guilds[0].categories[1],
+      hidden: false,
+      pinned: true,
+      pinSortKey: 1,
+      channels: [
+        {
+          id: 'c2',
+          guildId: 'g1',
+          name: 'old-stuff',
+          type: 0,
+          parentId: 'cat2',
+          position: 0,
+          unread: false,
+          mentionCount: 0,
+          muted: false,
+          threads: []
+        }
+      ]
+    }
+    const { harmony } = mountApp(s)
+
+    const head = (await screen.findByText('General')).closest('.cat-head')!
+    await user.click(within(head as HTMLElement).getByTitle(/Move down/))
+    expect(harmony.reorderPinnedCategories).toHaveBeenCalledWith(['cat2', 'cat1'])
+  })
+})
+
+describe('FR-3 — pin threads', () => {
+  it('pins a thread from the sidebar', async () => {
+    const user = userEvent.setup()
+    const { harmony } = mountApp()
+
+    const row = (await screen.findByText('design-notes')).closest('.thread')!
+    await user.click(within(row as HTMLElement).getByTitle('Pin thread'))
+    expect(harmony.pinThread).toHaveBeenCalledWith('t1', true)
+  })
+
+  it('marks the pinned thread row with is-pinned', async () => {
+    mountApp()
+    const row = (await screen.findByText('standup')).closest('.thread')
+    expect(row).toHaveClass('is-pinned')
+    const other = screen.getByText('design-notes').closest('.thread')
+    expect(other).not.toHaveClass('is-pinned')
+  })
+
+  it('unpins and reorders from the Pinned view', async () => {
+    const user = userEvent.setup()
+    const { harmony } = mountApp()
+
+    await user.click(await screen.findByRole('button', { name: /^Pinned/ }))
+
+    const row = screen.getByText('standup').closest('.pin-row')!
+    await user.click(within(row as HTMLElement).getByTitle('Unpin'))
+    expect(harmony.pinThread).toHaveBeenCalledWith('t2', false)
+
+    await user.click(within(row as HTMLElement).getByTitle('Move down'))
+    expect(harmony.reorderPinnedThreads).toHaveBeenCalledWith(['gone', 't2'])
+  })
+
+  it('does not open a missing (tombstoned) pinned thread', async () => {
+    const user = userEvent.setup()
+    mountApp()
+    await user.click(await screen.findByRole('button', { name: /^Pinned/ }))
+
+    await user.click(screen.getByText('Removed thread'))
+    // the click is inert — the message pane still has nothing selected
+    expect(screen.getByText('Pick a channel on the left to read it.')).toBeInTheDocument()
+  })
+})
