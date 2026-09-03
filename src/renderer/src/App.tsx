@@ -166,12 +166,8 @@ export function App(): JSX.Element {
       {!connected ? (
         <div className="list">
           <div className="empty">
-            <h2>See every channel, in one place</h2>
-            <p>
-              Sign in with your Discord account. Harmony opens Discord's real login page, captures the
-              session, and connects to the gateway — then this list fills with every channel you can
-              read, across every server, with real unread and mention badges.
-            </p>
+            <h2>Harmony. It's not Discord.</h2>
+            <p>Less clutter, more intuitive</p>
             <p style={{ color: 'var(--text-muted)', fontSize: 12 }}>
               Password not working? Use the <b>QR code</b> in the login window (scan with the Discord
               mobile app) — no password or CAPTCHA.
