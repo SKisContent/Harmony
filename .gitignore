@@ -1,0 +1,21 @@
+# Playwright persistent profile — contains the live Discord auth token. NEVER commit.
+.pw-profile/
+.playwright-cli/
+.playwright/
+
+# Recon artifacts may contain real message content from servers
+docs/recon/*.json
+
+node_modules/
+dist/
+out/
+
+# electron-builder resources: keep the icons, ignore anything else dropped here
+build/*
+!build/icon.png
+!build/icon.ico
+!build/icon.icns
+*.log
+.DS_Store
+.env
+.env.*
