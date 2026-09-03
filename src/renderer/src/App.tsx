@@ -56,15 +56,45 @@ function usePersistedState<T extends string | boolean>(key: string, initial: T):
 function sortCategories(cats: CategoryGroup[], mode: CatSort): CategoryGroup[] {
   const uncategorised = cats.filter((c) => c.id === null)
   const named = cats.filter((c) => c.id !== null)
-  named.sort((a, b) => {
+  const byMode = (a: CategoryGroup, b: CategoryGroup): number => {
     if (mode === 'recent') {
       const av = BigInt(a.recentActivity || '0')
       const bv = BigInt(b.recentActivity || '0')
       return av > bv ? -1 : av < bv ? 1 : 0
     }
     return (a.name ?? '').localeCompare(b.name ?? '')
+  }
+  // FR-7: pinned categories float to the top, in their user-defined order.
+  const pinned = named.filter((c) => c.pinned).sort((a, b) => a.pinSortKey - b.pinSortKey)
+  const rest = named.filter((c) => !c.pinned).sort(byMode)
+  return [...uncategorised, ...pinned, ...rest]
+}
+
+/** localStorage-backed set of ids (used for per-guild "reveal hidden"). */
+function usePersistedSet(key: string): [Set<string>, (id: string) => void] {
+  const [set, setSet] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem(key)
+      if (raw) return new Set(JSON.parse(raw) as string[])
+    } catch {
+      /* ignore */
+    }
+    return new Set()
   })
-  return [...uncategorised, ...named]
+  const toggle = (id: string): void => {
+    setSet((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      try {
+        localStorage.setItem(key, JSON.stringify([...next]))
+      } catch {
+        /* ignore */
+      }
+      return next
+    })
+  }
+  return [set, toggle]
 }
 
 export function App(): JSX.Element {
@@ -74,8 +104,9 @@ export function App(): JSX.Element {
   const [unreadOnly, setUnreadOnly] = usePersistedState<boolean>('unreadOnly', false)
   const [hideMuted, setHideMuted] = usePersistedState<boolean>('hideMuted', true)
   const [catSort, setCatSort] = usePersistedState<CatSort>('catSort', 'alpha')
-  const [mode, setMode] = usePersistedState<'servers' | 'dms'>('mode', 'servers')
+  const [mode, setMode] = usePersistedState<'servers' | 'dms' | 'pinned'>('mode', 'servers')
   const [selection, setSelection] = useState<Selection | null>(null)
+  const [revealed, toggleRevealed] = usePersistedSet('revealedGuilds')
 
   useEffect(() => {
     window.harmony.getState().then(setState)
@@ -104,22 +135,36 @@ export function App(): JSX.Element {
     if (!state) return []
     let gs = state.guilds
     if (scope !== 'all') gs = gs.filter((g) => g.id === scope)
+    const filterActive = unreadOnly || hideMuted
     return gs
       .map((g) => {
-        const categories = sortCategories(g.categories, catSort)
-          .map((cat) => ({
+        const isRevealed = revealed.has(g.id)
+        const cats = sortCategories(g.categories, catSort).map((cat) => {
+          const channels = cat.channels.filter((c) => {
+            if (unreadOnly && !c.unread && c.mentionCount === 0) return false
+            if (hideMuted && c.muted) return false
+            return true
+          })
+          const emptyAfterFilter = channels.length === 0
+          // FR-6: hidden by the empty-category rule (store-computed, respects
+          // pin / force). Revealing the guild shows them anyway.
+          const ruleHidden = cat.hidden && !isRevealed
+          // filter-emptied categories just drop out; they come back with the filter.
+          const filterHidden =
+            filterActive && emptyAfterFilter && !cat.pinned && !cat.hidden
+          const uncategorisedEmpty = cat.id === null && emptyAfterFilter
+          return {
             ...cat,
-            channels: cat.channels.filter((c) => {
-              if (unreadOnly && !c.unread && c.mentionCount === 0) return false
-              if (hideMuted && c.muted) return false
-              return true
-            })
-          }))
-          .filter((cat) => cat.channels.length > 0)
-        return { ...g, categories }
+            channels,
+            hide: ruleHidden || filterHidden || uncategorisedEmpty
+          }
+        })
+        const hiddenCount = cats.filter((c) => c.id !== null && c.hidden && !c.pinned).length
+        const anyShown = cats.some((c) => !c.hide)
+        return { ...g, cats, hiddenCount, isRevealed, anyShown }
       })
-      .filter((g) => g.categories.length > 0)
-  }, [state, scope, unreadOnly, hideMuted, catSort])
+      .filter((g) => g.anyShown || g.hiddenCount > 0)
+  }, [state, scope, unreadOnly, hideMuted, catSort, revealed])
 
   // id -> name for every channel and joined thread, so <#id> mentions resolve
   const channelNames = useMemo(() => {
@@ -135,6 +180,34 @@ export function App(): JSX.Element {
   }, [state])
 
   const connected = state?.status === 'ready' || (state?.guilds.length ?? 0) > 0
+  const pinnedThreadIds = useMemo(
+    () => new Set((state?.local.pinnedThreads ?? []).map((p) => p.id)),
+    [state]
+  )
+
+  const setLayout = (
+    categoryId: string,
+    guildId: string,
+    patch: { pinned?: boolean; collapsed?: boolean; force?: 'show' | 'hide' | null }
+  ): void => void window.harmony.setCategoryLayout(categoryId, guildId, patch)
+
+  const moveCategory = (pinnedIds: string[], catId: string, dir: -1 | 1): void => {
+    const i = pinnedIds.indexOf(catId)
+    const j = i + dir
+    if (i < 0 || j < 0 || j >= pinnedIds.length) return
+    const next = [...pinnedIds]
+    ;[next[i], next[j]] = [next[j], next[i]]
+    void window.harmony.reorderPinnedCategories(next)
+  }
+
+  const movePinnedThread = (id: string, dir: -1 | 1): void => {
+    const ids = (state?.local.pinnedThreads ?? []).map((p) => p.id)
+    const i = ids.indexOf(id)
+    const j = i + dir
+    if (i < 0 || j < 0 || j >= ids.length) return
+    ;[ids[i], ids[j]] = [ids[j], ids[i]]
+    void window.harmony.reorderPinnedThreads(ids)
+  }
 
   return (
     <div className="app">
@@ -206,8 +279,17 @@ export function App(): JSX.Element {
                 Servers
               </button>
               <button className={mode === 'dms' ? 'seg on' : 'seg'} onClick={() => setMode('dms')}>
-                Direct Messages
+                DMs
                 {state && state.dms.some((d) => d.unread) ? <span className="seg-dot" /> : null}
+              </button>
+              <button
+                className={mode === 'pinned' ? 'seg on' : 'seg'}
+                onClick={() => setMode('pinned')}
+              >
+                Pinned
+                {state && state.local.pinnedThreads.some((p) => p.unread) ? (
+                  <span className="seg-dot" />
+                ) : null}
               </button>
             </div>
 
@@ -232,6 +314,31 @@ export function App(): JSX.Element {
                       <option value="recent">Most recent message</option>
                     </select>
                   </label>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={state?.local.hideEmptyCategories ?? true}
+                      onChange={(e) =>
+                        void window.harmony.setPref(
+                          'hideEmptyCategories',
+                          e.target.checked ? '1' : '0'
+                        )
+                      }
+                    />
+                    Hide empty categories
+                  </label>
+                  {(state?.local.hideEmptyCategories ?? true) && (
+                    <label>
+                      Empty means
+                      <select
+                        value={state?.local.emptyMode ?? 'no-visible'}
+                        onChange={(e) => void window.harmony.setPref('emptyMode', e.target.value)}
+                      >
+                        <option value="no-visible">No viewable channels</option>
+                        <option value="no-unread">Nothing unread</option>
+                      </select>
+                    </label>
+                  )}
                 </>
               )}
               <label>
@@ -321,11 +428,12 @@ export function App(): JSX.Element {
               {guilds.map((g) => {
                 let gUnread = 0
                 let gMentions = 0
-                for (const cat of g.categories)
+                for (const cat of g.cats)
                   for (const c of cat.channels) {
                     if (c.unread) gUnread++
                     gMentions += c.mentionCount
                   }
+                const pinnedIds = g.cats.filter((c) => c.pinned && c.id).map((c) => c.id as string)
                 return (
                   <section className="guild" key={g.id}>
                     <div className="guild-head">
@@ -337,75 +445,241 @@ export function App(): JSX.Element {
                       </span>
                     </div>
 
-                    {g.categories.map((cat) => (
-                      <div className="cat" key={cat.id ?? '__none__'}>
-                        {cat.name && (
-                          <div className="cat-head">
-                            <span className="icon">{ICON.category}</span>
-                            {cat.name}
-                          </div>
-                        )}
-                        {cat.channels.map((c) => (
-                          <div key={c.id}>
+                    {g.cats.map((cat) => {
+                      if (cat.hide && !g.isRevealed) return null
+                      const key = cat.id ?? '__none__'
+                      const pinIdx = cat.id ? pinnedIds.indexOf(cat.id) : -1
+                      return (
+                        <div
+                          className={'cat' + (cat.hide ? ' is-dimmed' : '')}
+                          key={key}
+                        >
+                          {cat.name && cat.id && (
                             <div
-                              className={
-                                'chan' +
-                                (c.unread ? ' is-unread' : '') +
-                                (c.muted ? ' is-muted' : '') +
-                                (selection?.channelId === c.id ? ' is-active' : '')
-                              }
+                              className={'cat-head' + (cat.pinned ? ' is-pinned' : '')}
+                              tabIndex={0}
                               onClick={() =>
-                                setSelection({
-                                  guildId: g.id,
-                                  guildName: g.name,
-                                  channelId: c.id,
-                                  channelName: c.name
-                                })
+                                setLayout(cat.id!, g.id, { collapsed: !cat.collapsed })
                               }
+                              onKeyDown={(e) => {
+                                if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+                                  e.preventDefault()
+                                  if (cat.pinned)
+                                    moveCategory(pinnedIds, cat.id!, e.key === 'ArrowUp' ? -1 : 1)
+                                } else if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault()
+                                  setLayout(cat.id!, g.id, { collapsed: !cat.collapsed })
+                                }
+                              }}
                             >
-                              <span className="icon">{ICON.channel}</span>
-                              <span className="name">{c.name}</span>
-                              {c.mentionCount > 0 ? (
-                                <span className="badge">{c.mentionCount}</span>
-                              ) : c.unread ? (
-                                <span className="dot" />
-                              ) : null}
+                              <span className="chev">{cat.collapsed ? '▸' : '▾'}</span>
+                              <span className="icon">{ICON.category}</span>
+                              <span className="cat-name">{cat.name}</span>
+                              <span className="cat-actions">
+                                {cat.pinned && (
+                                  <>
+                                    <button
+                                      title="Move up (Alt+↑)"
+                                      disabled={pinIdx <= 0}
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        moveCategory(pinnedIds, cat.id!, -1)
+                                      }}
+                                    >
+                                      ↑
+                                    </button>
+                                    <button
+                                      title="Move down (Alt+↓)"
+                                      disabled={pinIdx < 0 || pinIdx >= pinnedIds.length - 1}
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        moveCategory(pinnedIds, cat.id!, 1)
+                                      }}
+                                    >
+                                      ↓
+                                    </button>
+                                  </>
+                                )}
+                                <button
+                                  className={cat.pinned ? 'on' : ''}
+                                  title={cat.pinned ? 'Unpin category' : 'Pin category to top'}
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    setLayout(cat.id!, g.id, { pinned: !cat.pinned })
+                                  }}
+                                >
+                                  📌
+                                </button>
+                              </span>
                             </div>
-                            {c.threads.map((t) => (
-                              <div
-                                key={t.id}
-                                className={
-                                  'thread' +
-                                  (t.unread ? ' is-unread' : '') +
-                                  (selection?.channelId === t.id ? ' is-active' : '')
-                                }
-                                onClick={() =>
-                                  setSelection({
-                                    guildId: g.id,
-                                    guildName: g.name,
-                                    channelId: t.id,
-                                    channelName: t.name,
-                                    isThread: true
-                                  })
-                                }
-                              >
-                                <span className="icon">{ICON.thread}</span>
-                                <span className="name">{t.name}</span>
-                                {t.mentionCount > 0 ? (
-                                  <span className="badge">{t.mentionCount}</span>
-                                ) : t.unread ? (
-                                  <span className="dot" />
-                                ) : null}
+                          )}
+                          {!cat.collapsed &&
+                            cat.channels.map((c) => (
+                              <div key={c.id}>
+                                <div
+                                  className={
+                                    'chan' +
+                                    (c.unread ? ' is-unread' : '') +
+                                    (c.muted ? ' is-muted' : '') +
+                                    (selection?.channelId === c.id ? ' is-active' : '')
+                                  }
+                                  onClick={() =>
+                                    setSelection({
+                                      guildId: g.id,
+                                      guildName: g.name,
+                                      channelId: c.id,
+                                      channelName: c.name
+                                    })
+                                  }
+                                >
+                                  <span className="icon">{ICON.channel}</span>
+                                  <span className="name">{c.name}</span>
+                                  {c.mentionCount > 0 ? (
+                                    <span className="badge">{c.mentionCount}</span>
+                                  ) : c.unread ? (
+                                    <span className="dot" />
+                                  ) : null}
+                                </div>
+                                {c.threads.map((t) => (
+                                  <div
+                                    key={t.id}
+                                    className={
+                                      'thread' +
+                                      (t.pinned ? ' is-pinned' : '') +
+                                      (t.unread ? ' is-unread' : '') +
+                                      (selection?.channelId === t.id ? ' is-active' : '')
+                                    }
+                                    onClick={() =>
+                                      setSelection({
+                                        guildId: g.id,
+                                        guildName: g.name,
+                                        channelId: t.id,
+                                        channelName: t.name,
+                                        isThread: true
+                                      })
+                                    }
+                                  >
+                                    <span className="icon">{ICON.thread}</span>
+                                    <span className="name">{t.name}</span>
+                                    <button
+                                      className={'pin-btn' + (t.pinned ? ' on' : '')}
+                                      title={t.pinned ? 'Unpin thread' : 'Pin thread'}
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        void window.harmony.pinThread(t.id, !t.pinned)
+                                      }}
+                                    >
+                                      📌
+                                    </button>
+                                    {t.mentionCount > 0 ? (
+                                      <span className="badge">{t.mentionCount}</span>
+                                    ) : t.unread ? (
+                                      <span className="dot" />
+                                    ) : null}
+                                  </div>
+                                ))}
                               </div>
                             ))}
-                          </div>
-                        ))}
-                      </div>
-                    ))}
+                        </div>
+                      )
+                    })}
+
+                    {g.hiddenCount > 0 && (
+                      <button className="cat-hidden-toggle" onClick={() => toggleRevealed(g.id)}>
+                        {g.isRevealed
+                          ? 'Hide empty categories'
+                          : `⨯ ${g.hiddenCount} hidden ${
+                              g.hiddenCount === 1 ? 'category' : 'categories'
+                            }`}
+                      </button>
+                    )}
                   </section>
                 )
               })}
             </div>
+            )}
+
+            {mode === 'pinned' && (
+              <div className="list">
+                {(state?.local.pinnedThreads ?? []).length === 0 && (
+                  <div className="empty small">
+                    No pinned threads. Hover a thread in the sidebar and hit 📌.
+                  </div>
+                )}
+                {(state?.local.pinnedThreads ?? []).map((p, i, arr) => (
+                  <div
+                    key={p.id}
+                    className={
+                      'pin-row' +
+                      (p.missing ? ' is-missing' : '') +
+                      (p.unread ? ' is-unread' : '') +
+                      (selection?.channelId === p.id ? ' is-active' : '')
+                    }
+                    onClick={() =>
+                      !p.missing &&
+                      setSelection({
+                        guildId: p.guildId,
+                        guildName: p.guildName,
+                        channelId: p.id,
+                        channelName: p.name,
+                        isThread: true
+                      })
+                    }
+                  >
+                    <span className="icon">{ICON.thread}</span>
+                    <div className="pin-body">
+                      <div className="pin-title">
+                        {p.label && <span className="pin-label">{p.label}</span>}
+                        {p.name}
+                        {p.archived && <span className="pin-tag">archived</span>}
+                        {p.missing && <span className="pin-tag warn">removed from Discord</span>}
+                      </div>
+                      {!p.missing && (
+                        <div className="pin-crumb">
+                          {p.guildName} › {p.parentName || 'channel'}
+                        </div>
+                      )}
+                      {p.note && <div className="pin-note">{p.note}</div>}
+                    </div>
+                    {p.mentionCount > 0 ? (
+                      <span className="badge">{p.mentionCount}</span>
+                    ) : p.unread ? (
+                      <span className="dot" />
+                    ) : null}
+                    <span className="pin-actions">
+                      <button
+                        title="Move up"
+                        disabled={i === 0}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          movePinnedThread(p.id, -1)
+                        }}
+                      >
+                        ↑
+                      </button>
+                      <button
+                        title="Move down"
+                        disabled={i === arr.length - 1}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          movePinnedThread(p.id, 1)
+                        }}
+                      >
+                        ↓
+                      </button>
+                      <button
+                        title="Unpin"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          void window.harmony.pinThread(p.id, false)
+                        }}
+                      >
+                        ✕
+                      </button>
+                    </span>
+                  </div>
+                ))}
+              </div>
             )}
           </aside>
 
@@ -413,6 +687,7 @@ export function App(): JSX.Element {
             <MessagePane
               selection={selection}
               channelNames={channelNames}
+              pinnedThreadIds={pinnedThreadIds}
               onOpen={setSelection}
             />
           </main>

@@ -40,6 +40,8 @@ export interface ThreadRow {
   messageCount: number
   unread: boolean
   mentionCount: number
+  /** Harmony-local pin (FR-3). */
+  pinned: boolean
 }
 
 export interface ChannelRow {
@@ -75,6 +77,36 @@ export interface CategoryGroup {
   /** highest child-channel last_message_id (snowflake string); '0' if none. */
   recentActivity: string
   channels: ChannelRow[]
+  /** Harmony-local: pinned to the top of the guild (FR-7). */
+  pinned: boolean
+  /** order among pinned categories (lower first); 0 when not pinned. */
+  pinSortKey: number
+  /** Harmony-local: collapsed in the sidebar (FR-7). */
+  collapsed: boolean
+  /**
+   * Harmony-local: auto-hidden because it has no viewable channels and
+   * "hide empty categories" is on (FR-6). Channels are still included so the
+   * "N hidden" affordance can reveal them.
+   */
+  hidden: boolean
+}
+
+export interface PinnedThreadView {
+  id: string
+  name: string
+  guildId: string
+  guildName: string
+  parentId: string
+  parentName: string
+  archived: boolean
+  unread: boolean
+  mentionCount: number
+  messageCount: number
+  note: string | null
+  label: string | null
+  sortKey: number
+  /** upstream thread we can no longer see — show a tombstone, don't drop it. */
+  missing: boolean
 }
 
 export interface GuildGroup {
@@ -118,6 +150,14 @@ export interface UnifiedState {
   /** epoch ms of the last successful READY ingest. */
   syncedAt: number | null
   counts: { guilds: number; channels: number; unread: number; mentions: number }
+  /** Harmony-local layout state (FR-3 / FR-6 / FR-7). */
+  local: {
+    hideEmptyCategories: boolean
+    /** definition of "empty" for FR-6. */
+    emptyMode: 'no-visible' | 'no-unread'
+    /** every pinned thread, across all guilds, for the global Pinned view. */
+    pinnedThreads: PinnedThreadView[]
+  }
 }
 
 export interface MessageRow {
@@ -163,4 +203,19 @@ export interface HarmonyApi {
   onState(cb: (state: UnifiedState) => void): () => void
   /** Live message create/update/delete for whichever channel is open. */
   onMessage(cb: (evt: LiveMessage) => void): () => void
+
+  // --- Harmony-local layout (FR-3 / FR-6 / FR-7) ---
+  setPref(key: string, value: string): Promise<void>
+  pinThread(threadId: string, pinned: boolean): Promise<void>
+  setThreadPinMeta(
+    threadId: string,
+    patch: { note?: string | null; label?: string | null }
+  ): Promise<void>
+  reorderPinnedThreads(ids: string[]): Promise<void>
+  setCategoryLayout(
+    categoryId: string,
+    guildId: string,
+    patch: { pinned?: boolean; collapsed?: boolean; force?: 'show' | 'hide' | null }
+  ): Promise<void>
+  reorderPinnedCategories(ids: string[]): Promise<void>
 }

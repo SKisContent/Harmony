@@ -34,10 +34,12 @@ function applyUpdate(prev: MessageRow[], patch: MessageRow): MessageRow[] {
 export function MessagePane({
   selection,
   channelNames,
+  pinnedThreadIds,
   onOpen
 }: {
   selection: Selection | null
   channelNames: Map<string, string>
+  pinnedThreadIds: Set<string>
   onOpen: (sel: Selection) => void
 }): JSX.Element {
   const [messages, setMessages] = useState<MessageRow[]>([])
@@ -204,6 +206,46 @@ export function MessagePane({
   const activeThreads = threads.filter((t) => !t.archived)
   const archivedThreads = threads.filter((t) => t.archived)
 
+  const renderThreadRow = (t: ThreadSummary): JSX.Element => {
+    const pinned = pinnedThreadIds.has(t.id)
+    return (
+      <div
+        key={t.id}
+        role="button"
+        tabIndex={0}
+        className={
+          'ts-item' +
+          (t.archived ? ' archived' : '') +
+          (pinned ? ' pinned' : '') +
+          (selection?.channelId === t.id ? ' current' : '')
+        }
+        onClick={() =>
+          selection &&
+          onOpen({
+            guildId: selection.guildId,
+            guildName: selection.guildName,
+            channelId: t.id,
+            channelName: t.name,
+            isThread: true
+          })
+        }
+      >
+        <span className="ts-name">〰️ {t.name}</span>
+        <button
+          className={'pin-btn' + (pinned ? ' on' : '')}
+          title={pinned ? 'Unpin thread' : 'Pin thread'}
+          onClick={(e) => {
+            e.stopPropagation()
+            void window.harmony.pinThread(t.id, !pinned)
+          }}
+        >
+          📌
+        </button>
+        <span className="ts-count">{t.messageCount}</span>
+      </div>
+    )
+  }
+
   return (
     <>
       <div className="content-header">
@@ -369,45 +411,11 @@ export function MessagePane({
               {activeThreads.length > 0 && (
                 <div className="ts-label">Active — {activeThreads.length}</div>
               )}
-              {activeThreads.map((t) => (
-                <button
-                  key={t.id}
-                  className={'ts-item' + (selection.channelId === t.id ? ' current' : '')}
-                  onClick={() =>
-                    onOpen({
-                      guildId: selection.guildId,
-                      guildName: selection.guildName,
-                      channelId: t.id,
-                      channelName: t.name,
-                      isThread: true
-                    })
-                  }
-                >
-                  <span className="ts-name">〰️ {t.name}</span>
-                  <span className="ts-count">{t.messageCount}</span>
-                </button>
-              ))}
+              {activeThreads.map(renderThreadRow)}
               {archivedThreads.length > 0 && (
                 <div className="ts-label">Archived — {archivedThreads.length}</div>
               )}
-              {archivedThreads.map((t) => (
-                <button
-                  key={t.id}
-                  className={'ts-item archived' + (selection.channelId === t.id ? ' current' : '')}
-                  onClick={() =>
-                    onOpen({
-                      guildId: selection.guildId,
-                      guildName: selection.guildName,
-                      channelId: t.id,
-                      channelName: t.name,
-                      isThread: true
-                    })
-                  }
-                >
-                  <span className="ts-name">〰️ {t.name}</span>
-                  <span className="ts-count">{t.messageCount}</span>
-                </button>
-              ))}
+              {archivedThreads.map(renderThreadRow)}
             </div>
           </aside>
         )}

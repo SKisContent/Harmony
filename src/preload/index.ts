@@ -24,7 +24,22 @@ const api: HarmonyApi = {
     const listener = (_e: unknown, evt: LiveMessage) => cb(evt)
     ipcRenderer.on('harmony:message', listener)
     return () => ipcRenderer.removeListener('harmony:message', listener)
-  }
+  },
+
+  setPref: (key: string, value: string) => ipcRenderer.invoke('harmony:setPref', key, value),
+  pinThread: (threadId: string, pinned: boolean) =>
+    ipcRenderer.invoke('harmony:pinThread', threadId, pinned),
+  setThreadPinMeta: (threadId: string, patch: { note?: string | null; label?: string | null }) =>
+    ipcRenderer.invoke('harmony:setThreadPinMeta', threadId, patch),
+  reorderPinnedThreads: (ids: string[]) =>
+    ipcRenderer.invoke('harmony:reorderPinnedThreads', ids),
+  setCategoryLayout: (
+    categoryId: string,
+    guildId: string,
+    patch: { pinned?: boolean; collapsed?: boolean; force?: 'show' | 'hide' | null }
+  ) => ipcRenderer.invoke('harmony:setCategoryLayout', categoryId, guildId, patch),
+  reorderPinnedCategories: (ids: string[]) =>
+    ipcRenderer.invoke('harmony:reorderPinnedCategories', ids)
 }
 
 contextBridge.exposeInMainWorld('harmony', api)

@@ -2,7 +2,21 @@ import { EventEmitter } from 'node:events'
 import { join } from 'node:path'
 import { app } from 'electron'
 import { readSecure } from './secure-file'
-import { clearModel, loadModel, saveModel, type StoreModel } from './db'
+import {
+  type LocalState,
+  clearModel,
+  loadLocalState,
+  loadModel,
+  pinThread,
+  reorderPinnedCategories,
+  reorderPinnedThreads,
+  saveModel,
+  setCategoryLayout,
+  setPref,
+  type StoreModel,
+  unpinThread,
+  updateThreadPin
+} from './db'
 import { toRow } from './rest'
 import {
   type CategoryGroup,
@@ -11,6 +25,7 @@ import {
   type DmMemberRow,
   type DmRow,
   type GuildGroup,
+  type PinnedThreadView,
   type PresenceStatus,
   type ThreadRow,
   type UnifiedState,
@@ -102,10 +117,63 @@ export class Store extends EventEmitter {
   private mutedGuilds = new Set<string>()
   private mutedChannels = new Set<string>()
   private syncedAt: number | null = null
+  private local: LocalState = { prefs: {}, pinnedThreads: [], categoryLayout: {} }
 
   constructor() {
     super()
     this.loadFromDb()
+    this.reloadLocal()
+  }
+
+  private reloadLocal(): void {
+    try {
+      this.local = loadLocalState()
+    } catch (e) {
+      console.error('[store] local state load failed:', (e as Error).message)
+    }
+  }
+
+  // --- Harmony-local layout mutations (FR-3 / FR-6 / FR-7) ---------------
+
+  setPref(key: string, value: string): void {
+    setPref(key, value)
+    this.reloadLocal()
+    this.emit('change')
+  }
+
+  setThreadPinned(threadId: string, pinned: boolean): void {
+    if (pinned) pinThread(threadId, this.local.pinnedThreads.length)
+    else unpinThread(threadId)
+    this.reloadLocal()
+    this.emit('change')
+  }
+
+  setThreadPinMeta(threadId: string, patch: { note?: string | null; label?: string | null }): void {
+    updateThreadPin(threadId, patch)
+    this.reloadLocal()
+    this.emit('change')
+  }
+
+  reorderPinnedThreads(ids: string[]): void {
+    reorderPinnedThreads(ids)
+    this.reloadLocal()
+    this.emit('change')
+  }
+
+  setCategoryLayout(
+    categoryId: string,
+    guildId: string,
+    patch: { pinned?: boolean; collapsed?: boolean; force?: 'show' | 'hide' | null }
+  ): void {
+    setCategoryLayout(categoryId, guildId, patch)
+    this.reloadLocal()
+    this.emit('change')
+  }
+
+  reorderPinnedCategories(ids: string[]): void {
+    reorderPinnedCategories(ids)
+    this.reloadLocal()
+    this.emit('change')
   }
 
   setStatus(status: ConnectionStatus, detail?: string): void {
@@ -315,6 +383,12 @@ export class Store extends EventEmitter {
     let mentionTotal = 0
     let channelTotal = 0
 
+    const pinnedThreadIds = new Set(this.local.pinnedThreads.map((p) => p.threadId))
+    const { categoryLayout } = this.local
+    const hideEmptyCategories = this.local.prefs.hideEmptyCategories !== '0'
+    const emptyMode: UnifiedState['local']['emptyMode'] =
+      this.local.prefs.emptyMode === 'no-unread' ? 'no-unread' : 'no-visible'
+
     // active threads grouped by their parent channel id
     const threadsByParent = new Map<string, ThreadRow[]>()
     for (const t of this.threads.values()) {
@@ -330,13 +404,19 @@ export class Store extends EventEmitter {
         archived: !!t.thread_metadata?.archived,
         messageCount: t.message_count ?? 0,
         unread,
-        mentionCount: rs?.mention_count ?? 0
+        mentionCount: rs?.mention_count ?? 0,
+        pinned: pinnedThreadIds.has(t.id)
       }
       const list = threadsByParent.get(t.parent_id) ?? threadsByParent.set(t.parent_id, []).get(t.parent_id)!
       list.push(row)
     }
     for (const list of threadsByParent.values()) {
-      list.sort((a, b) => Number(b.unread) - Number(a.unread) || a.name.localeCompare(b.name))
+      list.sort(
+        (a, b) =>
+          Number(b.pinned) - Number(a.pinned) ||
+          Number(b.unread) - Number(a.unread) ||
+          a.name.localeCompare(b.name)
+      )
     }
 
     for (const g of this.guilds.values()) {
@@ -386,12 +466,53 @@ export class Store extends EventEmitter {
           return raw && BigInt(raw) > BigInt(max) ? raw : max
         }, '0')
         const meta = key ? categoryNames.get(key) : undefined
+        const layout = key ? categoryLayout[key] : undefined
+        const pinned = !!layout?.pinned
+
+        // FR-6: hide a real category with nothing worth showing, unless pinned
+        // or force-shown; force-hide always wins.
+        const empty =
+          emptyMode === 'no-unread'
+            ? !rows.some((r) => r.unread || r.mentionCount > 0)
+            : rows.length === 0
+        let hidden = false
+        if (layout?.force === 'hide') hidden = true
+        else if (layout?.force === 'show' || pinned) hidden = false
+        else if (hideEmptyCategories && key && empty) hidden = true
+
         categories.push({
           id: key || null,
           name: meta?.name ?? null,
           position: meta?.position ?? -1,
           recentActivity,
-          channels: rows
+          channels: rows,
+          pinned,
+          pinSortKey: layout?.sortKey ?? 0,
+          collapsed: !!layout?.collapsed,
+          hidden
+        })
+      }
+
+      // FR-6: categories with no viewable channels at all. Kept in the model
+      // (flagged hidden) so the "N hidden categories" affordance can reveal them.
+      for (const [catId, cmeta] of categoryNames) {
+        if (buckets.has(catId)) continue
+        const layout = categoryLayout[catId]
+        const pinned = !!layout?.pinned
+        let hidden = false
+        if (layout?.force === 'hide') hidden = true
+        else if (layout?.force === 'show' || pinned) hidden = false
+        else if (hideEmptyCategories) hidden = true
+        categories.push({
+          id: catId,
+          name: cmeta.name,
+          position: cmeta.position,
+          recentActivity: '0',
+          channels: [],
+          pinned,
+          pinSortKey: layout?.sortKey ?? 0,
+          collapsed: !!layout?.collapsed,
+          hidden
         })
       }
 
@@ -420,8 +541,68 @@ export class Store extends EventEmitter {
         channels: channelTotal,
         unread: unreadTotal,
         mentions: mentionTotal
+      },
+      local: {
+        hideEmptyCategories,
+        emptyMode,
+        pinnedThreads: this.buildPinnedThreads()
       }
     }
+  }
+
+  /** Resolve every pinned thread id for the global "Pinned" view (FR-3 / Q14). */
+  private buildPinnedThreads(): PinnedThreadView[] {
+    const guildName = (id: string | undefined): string => {
+      if (!id) return ''
+      const g = this.guilds.get(id)
+      return g?.properties?.name ?? g?.name ?? 'Unknown server'
+    }
+    const channelName = (guildId: string | undefined, channelId: string | undefined): string => {
+      if (!guildId || !channelId) return ''
+      return this.guilds.get(guildId)?.channels?.find((c) => c.id === channelId)?.name ?? ''
+    }
+
+    return this.local.pinnedThreads.map((p) => {
+      const t = this.threads.get(p.threadId)
+      if (!t) {
+        return {
+          id: p.threadId,
+          name: p.label || 'Removed thread',
+          guildId: '',
+          guildName: '',
+          parentId: '',
+          parentName: '',
+          archived: false,
+          unread: false,
+          mentionCount: 0,
+          messageCount: 0,
+          note: p.note,
+          label: p.label,
+          sortKey: p.sortKey,
+          missing: true
+        }
+      }
+      const rs = this.readStates.get(t.id)
+      const unread =
+        !!t.last_message_id &&
+        (!rs?.last_message_id || BigInt(t.last_message_id) > BigInt(rs.last_message_id))
+      return {
+        id: t.id,
+        name: t.name ?? 'thread',
+        guildId: t.guild_id ?? '',
+        guildName: guildName(t.guild_id),
+        parentId: t.parent_id ?? '',
+        parentName: channelName(t.guild_id, t.parent_id),
+        archived: !!t.thread_metadata?.archived,
+        unread,
+        mentionCount: rs?.mention_count ?? 0,
+        messageCount: t.message_count ?? 0,
+        note: p.note,
+        label: p.label,
+        sortKey: p.sortKey,
+        missing: false
+      }
+    })
   }
 
   private userName(id: string): string {

@@ -652,10 +652,262 @@ button:disabled {
   white-space: nowrap;
 }
 
+.ts-item {
+  cursor: pointer;
+}
+
+.ts-item.pinned .ts-name {
+  font-weight: 700;
+}
+
 .ts-count {
   color: var(--text-muted);
   font-size: 11px;
   flex: none;
+}
+
+/* FR-3 / FR-6 / FR-7 — pin, collapse, reorder, hide-empty ------------- */
+.chan .name,
+.thread .name {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.cat-head {
+  cursor: pointer;
+  user-select: none;
+  border-radius: 5px;
+}
+
+.cat-head:hover {
+  color: var(--text-dim);
+}
+
+.cat-head:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.cat-head .chev {
+  flex: none;
+  width: 10px;
+  font-size: 9px;
+  opacity: 0.7;
+}
+
+.cat-head .cat-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cat-head.is-pinned .cat-name {
+  color: var(--text-dim);
+}
+
+.cat-actions {
+  display: none;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.cat-head:hover .cat-actions,
+.cat-head:focus-within .cat-actions,
+.cat-head.is-pinned .cat-actions {
+  display: flex;
+}
+
+.cat-actions button {
+  background: transparent;
+  border: 0;
+  padding: 0 3px;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-muted);
+  cursor: pointer;
+  filter: grayscale(1);
+  opacity: 0.6;
+}
+
+.cat-actions button:hover:not(:disabled) {
+  opacity: 1;
+}
+
+.cat-actions button.on {
+  filter: none;
+  opacity: 1;
+}
+
+.cat-actions button:disabled {
+  opacity: 0.2;
+  cursor: default;
+}
+
+.cat.is-dimmed {
+  opacity: 0.5;
+}
+
+.cat-hidden-toggle {
+  display: block;
+  width: calc(100% - 24px);
+  margin: 3px 12px 6px;
+  padding: 3px 8px;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 5px;
+}
+
+.cat-hidden-toggle:hover {
+  background: var(--bg-3);
+  color: var(--text-dim);
+}
+
+.pin-btn {
+  flex: none;
+  background: transparent;
+  border: 0;
+  padding: 0 2px;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  filter: grayscale(1);
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+
+.thread:hover .pin-btn,
+.ts-item:hover .pin-btn,
+.pin-btn.on {
+  opacity: 0.75;
+}
+
+.pin-btn.on {
+  filter: none;
+  opacity: 1;
+}
+
+.pin-btn:hover {
+  opacity: 1;
+}
+
+/* Pinned view (mode === 'pinned') */
+.pin-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 2px 6px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text-dim);
+}
+
+.pin-row:hover {
+  background: var(--bg-3);
+}
+
+.pin-row.is-active {
+  background: var(--bg-3);
+  color: var(--text);
+}
+
+.pin-row.is-unread {
+  color: var(--unread);
+}
+
+.pin-row.is-missing {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.pin-row .icon {
+  margin-top: 2px;
+}
+
+.pin-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.pin-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pin-label {
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: 3px;
+  padding: 0 4px;
+}
+
+.pin-tag {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  color: var(--text-muted);
+}
+
+.pin-tag.warn {
+  color: var(--mention);
+}
+
+.pin-crumb {
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pin-note {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+.pin-actions {
+  display: none;
+  gap: 1px;
+  flex: none;
+}
+
+.pin-row:hover .pin-actions {
+  display: flex;
+}
+
+.pin-actions button {
+  background: transparent;
+  border: 0;
+  padding: 0 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.pin-actions button:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.pin-actions button:disabled {
+  opacity: 0.25;
+  cursor: default;
 }
 
 .messages {

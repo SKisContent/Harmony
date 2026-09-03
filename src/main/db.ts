@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { app } from 'electron'
 import Database from 'better-sqlite3'
 
-const SCHEMA_VERSION = 1
+const SCHEMA_VERSION = 2
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -84,6 +84,26 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
   channel_id UNINDEXED,
   tokenize = 'unicode61 remove_diacritics 2'
 );
+
+-- Harmony-local layout state (never sent to Discord). FR-3 / FR-6 / FR-7.
+CREATE TABLE IF NOT EXISTS pinned_threads (
+  thread_id TEXT PRIMARY KEY,
+  added_at  INTEGER NOT NULL,
+  sort_key  REAL NOT NULL,
+  note      TEXT,
+  label     TEXT
+);
+
+CREATE TABLE IF NOT EXISTS category_layout (
+  category_id TEXT PRIMARY KEY,
+  guild_id    TEXT NOT NULL,
+  pinned      INTEGER NOT NULL DEFAULT 0,
+  sort_key    REAL NOT NULL DEFAULT 0,
+  collapsed   INTEGER NOT NULL DEFAULT 0,
+  force       TEXT                         -- NULL | 'show' | 'hide'
+);
+
+CREATE TABLE IF NOT EXISTS prefs (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `
 
 let handle: Database.Database | null = null
@@ -211,6 +231,160 @@ export function loadModel(): StoreModel | null {
     mutedGuilds: mutedRows.filter((r) => r.kind === 'guild').map((r) => r.id),
     mutedChannels: mutedRows.filter((r) => r.kind === 'channel').map((r) => r.id)
   }
+}
+
+// --- Harmony-local layout state (FR-3 / FR-6 / FR-7) --------------------
+
+export interface PinnedThreadRow {
+  threadId: string
+  addedAt: number
+  sortKey: number
+  note: string | null
+  label: string | null
+}
+
+export interface CategoryLayoutRow {
+  guildId: string
+  pinned: boolean
+  sortKey: number
+  collapsed: boolean
+  force: 'show' | 'hide' | null
+}
+
+export interface LocalState {
+  prefs: Record<string, string>
+  pinnedThreads: PinnedThreadRow[]
+  categoryLayout: Record<string, CategoryLayoutRow>
+}
+
+export function loadLocalState(): LocalState {
+  const d = db()
+  const prefs: Record<string, string> = {}
+  for (const r of d.prepare('SELECT key, value FROM prefs').all() as {
+    key: string
+    value: string
+  }[]) {
+    prefs[r.key] = r.value
+  }
+
+  const pinnedThreads = (
+    d
+      .prepare('SELECT thread_id, added_at, sort_key, note, label FROM pinned_threads ORDER BY sort_key')
+      .all() as {
+      thread_id: string
+      added_at: number
+      sort_key: number
+      note: string | null
+      label: string | null
+    }[]
+  ).map((r) => ({
+    threadId: r.thread_id,
+    addedAt: r.added_at,
+    sortKey: r.sort_key,
+    note: r.note,
+    label: r.label
+  }))
+
+  const categoryLayout: Record<string, CategoryLayoutRow> = {}
+  for (const r of d
+    .prepare('SELECT category_id, guild_id, pinned, sort_key, collapsed, force FROM category_layout')
+    .all() as {
+    category_id: string
+    guild_id: string
+    pinned: number
+    sort_key: number
+    collapsed: number
+    force: string | null
+  }[]) {
+    categoryLayout[r.category_id] = {
+      guildId: r.guild_id,
+      pinned: !!r.pinned,
+      sortKey: r.sort_key,
+      collapsed: !!r.collapsed,
+      force: r.force === 'show' || r.force === 'hide' ? r.force : null
+    }
+  }
+
+  return { prefs, pinnedThreads, categoryLayout }
+}
+
+export function setPref(key: string, value: string): void {
+  db()
+    .prepare('INSERT INTO prefs (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?')
+    .run(key, value, value)
+}
+
+export function pinThread(threadId: string, sortKey: number): void {
+  db()
+    .prepare(
+      `INSERT INTO pinned_threads (thread_id, added_at, sort_key) VALUES (?, ?, ?)
+       ON CONFLICT(thread_id) DO NOTHING`
+    )
+    .run(threadId, Date.now(), sortKey)
+}
+
+export function unpinThread(threadId: string): void {
+  db().prepare('DELETE FROM pinned_threads WHERE thread_id = ?').run(threadId)
+}
+
+export function updateThreadPin(
+  threadId: string,
+  patch: { note?: string | null; label?: string | null; sortKey?: number }
+): void {
+  const d = db()
+  if (patch.note !== undefined)
+    d.prepare('UPDATE pinned_threads SET note = ? WHERE thread_id = ?').run(patch.note, threadId)
+  if (patch.label !== undefined)
+    d.prepare('UPDATE pinned_threads SET label = ? WHERE thread_id = ?').run(patch.label, threadId)
+  if (patch.sortKey !== undefined)
+    d.prepare('UPDATE pinned_threads SET sort_key = ? WHERE thread_id = ?').run(
+      patch.sortKey,
+      threadId
+    )
+}
+
+export function reorderPinnedThreads(orderedIds: string[]): void {
+  const d = db()
+  const upd = d.prepare('UPDATE pinned_threads SET sort_key = ? WHERE thread_id = ?')
+  const run = d.transaction((ids: string[]) => ids.forEach((id, i) => upd.run(i, id)))
+  run(orderedIds)
+}
+
+export function setCategoryLayout(
+  categoryId: string,
+  guildId: string,
+  patch: { pinned?: boolean; sortKey?: number; collapsed?: boolean; force?: 'show' | 'hide' | null }
+): void {
+  const d = db()
+  d.prepare(
+    `INSERT INTO category_layout (category_id, guild_id, pinned, sort_key, collapsed, force)
+     VALUES (@id, @guild, 0, 0, 0, NULL)
+     ON CONFLICT(category_id) DO NOTHING`
+  ).run({ id: categoryId, guild: guildId })
+  if (patch.pinned !== undefined)
+    d.prepare('UPDATE category_layout SET pinned = ? WHERE category_id = ?').run(
+      patch.pinned ? 1 : 0,
+      categoryId
+    )
+  if (patch.sortKey !== undefined)
+    d.prepare('UPDATE category_layout SET sort_key = ? WHERE category_id = ?').run(
+      patch.sortKey,
+      categoryId
+    )
+  if (patch.collapsed !== undefined)
+    d.prepare('UPDATE category_layout SET collapsed = ? WHERE category_id = ?').run(
+      patch.collapsed ? 1 : 0,
+      categoryId
+    )
+  if (patch.force !== undefined)
+    d.prepare('UPDATE category_layout SET force = ? WHERE category_id = ?').run(patch.force, categoryId)
+}
+
+export function reorderPinnedCategories(orderedIds: string[]): void {
+  const d = db()
+  const upd = d.prepare('UPDATE category_layout SET sort_key = ? WHERE category_id = ?')
+  const run = d.transaction((ids: string[]) => ids.forEach((id, i) => upd.run(i, id)))
+  run(orderedIds)
 }
 
 /** Wipe every table — used on sign-out so the local cache really is cleared. */

@@ -145,6 +145,32 @@ ipcMain.handle(
   }
 )
 
+// --- Harmony-local layout (FR-3 / FR-6 / FR-7) ---
+ipcMain.handle('harmony:setPref', (_e, key: string, value: string) => store.setPref(key, value))
+ipcMain.handle('harmony:pinThread', (_e, threadId: string, pinned: boolean) =>
+  store.setThreadPinned(threadId, pinned)
+)
+ipcMain.handle(
+  'harmony:setThreadPinMeta',
+  (_e, threadId: string, patch: { note?: string | null; label?: string | null }) =>
+    store.setThreadPinMeta(threadId, patch ?? {})
+)
+ipcMain.handle('harmony:reorderPinnedThreads', (_e, ids: string[]) =>
+  store.reorderPinnedThreads(ids ?? [])
+)
+ipcMain.handle(
+  'harmony:setCategoryLayout',
+  (
+    _e,
+    categoryId: string,
+    guildId: string,
+    patch: { pinned?: boolean; collapsed?: boolean; force?: 'show' | 'hide' | null }
+  ) => store.setCategoryLayout(categoryId, guildId, patch ?? {})
+)
+ipcMain.handle('harmony:reorderPinnedCategories', (_e, ids: string[]) =>
+  store.reorderPinnedCategories(ids ?? [])
+)
+
 app.whenReady().then(() => {
   createWindow()
   const token = loadToken()
