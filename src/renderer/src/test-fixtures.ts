@@ -43,6 +43,7 @@ export function makeState(over: Partial<UnifiedState> = {}): UnifiedState {
         name: 'Acme',
         iconUrl: null,
         position: 0,
+        muted: false,
         categories: [
           category({
             id: 'cat1',

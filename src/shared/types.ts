@@ -114,6 +114,7 @@ export interface GuildGroup {
   name: string
   iconUrl: string | null
   position: number
+  muted: boolean
   categories: CategoryGroup[]
 }
 
@@ -160,6 +161,17 @@ export interface UnifiedState {
   }
 }
 
+export interface ReactionRow {
+  /** the form Discord's reaction API expects: `name:id` for custom, else the char. */
+  key: string
+  name: string
+  id: string | null
+  animated: boolean
+  count: number
+  /** true when the current user has reacted with this emoji. */
+  me: boolean
+}
+
 export interface MessageRow {
   id: string
   authorId: string
@@ -173,6 +185,7 @@ export interface MessageRow {
   system: boolean
   /** users referenced by <@id> in this message, for mention rendering. */
   mentions: { id: string; name: string }[]
+  reactions: ReactionRow[]
 }
 
 /** A live change to a single message, pushed over IPC while a channel is open. */
@@ -180,6 +193,26 @@ export type LiveMessage =
   | { kind: 'create'; channelId: string; message: MessageRow }
   | { kind: 'update'; channelId: string; message: MessageRow }
   | { kind: 'delete'; channelId: string; id: string }
+  | {
+      kind: 'reaction'
+      channelId: string
+      messageId: string
+      emoji: { key: string; name: string; id: string | null; animated: boolean }
+      delta: 1 | -1
+      me: boolean
+    }
+
+export interface TypingEvent {
+  channelId: string
+  userId: string
+  userName: string
+}
+
+export interface UploadedAttachment {
+  id: string
+  filename: string
+  uploaded_filename: string
+}
 
 export interface HarmonyApi {
   getState(): Promise<UnifiedState>
@@ -195,14 +228,47 @@ export interface HarmonyApi {
   sendMessage(
     channelId: string,
     content: string,
-    opts?: { replyToId?: string; pingReply?: boolean }
+    opts?: {
+      replyToId?: string
+      pingReply?: boolean
+      attachments?: UploadedAttachment[]
+    }
   ): Promise<{ ok: boolean; message?: MessageRow; error?: string }>
+  editMessage(
+    channelId: string,
+    messageId: string,
+    content: string
+  ): Promise<{ ok: boolean; message?: MessageRow; error?: string }>
+  deleteMessage(channelId: string, messageId: string): Promise<{ ok: boolean; error?: string }>
+  react(
+    channelId: string,
+    messageId: string,
+    emoji: string,
+    add: boolean
+  ): Promise<{ ok: boolean; error?: string }>
+  reactionUsers(
+    channelId: string,
+    messageId: string,
+    emoji: string
+  ): Promise<{ ok: boolean; users?: { id: string; name: string }[]; error?: string }>
+  ackChannel(channelId: string, messageId: string): Promise<void>
+  setMuted(
+    target: { guildId?: string; channelId?: string },
+    muted: boolean
+  ): Promise<{ ok: boolean; error?: string }>
+  startTyping(channelId: string): Promise<void>
+  uploadAttachment(
+    channelId: string,
+    file: { name: string; type: string; bytes: Uint8Array }
+  ): Promise<{ ok: boolean; ref?: UploadedAttachment; error?: string }>
   getThreads(
     channelId: string
   ): Promise<{ ok: boolean; threads?: ThreadSummary[]; error?: string }>
   onState(cb: (state: UnifiedState) => void): () => void
-  /** Live message create/update/delete for whichever channel is open. */
+  /** Live message create/update/delete/reaction for whichever channel is open. */
   onMessage(cb: (evt: LiveMessage) => void): () => void
+  /** Someone started typing in some channel. */
+  onTyping(cb: (evt: TypingEvent) => void): () => void
 
   // --- Harmony-local layout (FR-3 / FR-6 / FR-7) ---
   setPref(key: string, value: string): Promise<void>

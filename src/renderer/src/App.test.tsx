@@ -19,12 +19,21 @@ function mountApp(state: UnifiedState = makeState()): {
       return () => {}
     }),
     onMessage: vi.fn(() => () => {}),
+    onTyping: vi.fn(() => () => {}),
     login: vi.fn().mockResolvedValue({ ok: true }),
     setToken: vi.fn().mockResolvedValue({ ok: true }),
     logout: vi.fn().mockResolvedValue(undefined),
     reconnect: vi.fn().mockResolvedValue(undefined),
     getMessages: vi.fn().mockResolvedValue({ ok: true, messages: [] }),
     sendMessage: vi.fn().mockResolvedValue({ ok: false }),
+    editMessage: vi.fn().mockResolvedValue({ ok: true }),
+    deleteMessage: vi.fn().mockResolvedValue({ ok: true }),
+    react: vi.fn().mockResolvedValue({ ok: true }),
+    reactionUsers: vi.fn().mockResolvedValue({ ok: true, users: [] }),
+    ackChannel: vi.fn().mockResolvedValue(undefined),
+    setMuted: vi.fn().mockResolvedValue({ ok: true }),
+    startTyping: vi.fn().mockResolvedValue(undefined),
+    uploadAttachment: vi.fn().mockResolvedValue({ ok: true }),
     getThreads: vi.fn().mockResolvedValue({ ok: true, threads: [] }),
     setPref: vi.fn().mockResolvedValue(undefined),
     pinThread: vi.fn().mockResolvedValue(undefined),
@@ -211,6 +220,47 @@ describe('FR-7 — pin / collapse / reorder categories', () => {
     const head = (await screen.findByText('General')).closest('.cat-head')!
     await user.click(within(head as HTMLElement).getByTitle(/Move down/))
     expect(harmony.reorderPinnedCategories).toHaveBeenCalledWith(['cat2', 'cat1'])
+  })
+})
+
+describe('mute / unmute', () => {
+  it('mutes a channel with the right target', async () => {
+    const user = userEvent.setup()
+    const { harmony } = mountApp()
+    const row = (await screen.findByText('general')).closest('.chan')!
+    await user.click(within(row as HTMLElement).getByTitle('Mute channel'))
+    expect(harmony.setMuted).toHaveBeenCalledWith({ guildId: 'g1', channelId: 'c1' }, true)
+  })
+
+  it('mutes a server', async () => {
+    const user = userEvent.setup()
+    const { harmony } = mountApp()
+    await screen.findByText('general')
+    await user.click(screen.getByTitle('Mute server'))
+    expect(harmony.setMuted).toHaveBeenCalledWith({ guildId: 'g1' }, true)
+  })
+
+  it('mutes a DM conversation', async () => {
+    const user = userEvent.setup()
+    const s = makeState()
+    s.dms = [
+      {
+        id: 'dm1',
+        type: 1,
+        name: 'Dana',
+        iconUrl: null,
+        unread: false,
+        mentionCount: 0,
+        muted: false,
+        status: 'offline',
+        members: []
+      }
+    ]
+    const { harmony } = mountApp(s)
+    await user.click(await screen.findByRole('button', { name: /^DMs/ }))
+    const row = (await screen.findByText('Dana')).closest('.dm')!
+    await user.click(within(row as HTMLElement).getByTitle('Mute conversation'))
+    expect(harmony.setMuted).toHaveBeenCalledWith({ channelId: 'dm1' }, true)
   })
 })
 

@@ -1,7 +1,7 @@
-import { act, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { LiveMessage, MessageRow, ThreadSummary } from '@shared/types'
+import type { LiveMessage, MessageRow, ThreadSummary, TypingEvent } from '@shared/types'
 import { MessagePane } from './MessagePane'
 import type { Selection } from './App'
 
@@ -18,6 +18,7 @@ function msg(over: Partial<MessageRow> = {}): MessageRow {
     replyTo: null,
     system: false,
     mentions: [],
+    reactions: [],
     ...over
   }
 }
@@ -33,30 +34,51 @@ function mount(opts: {
   messages?: MessageRow[]
   threads?: ThreadSummary[]
   pinned?: Set<string>
+  selfId?: string
 }) {
   let onMsg: ((e: LiveMessage) => void) | null = null
+  let onTyp: ((e: TypingEvent) => void) | null = null
   const getMessages = vi.fn().mockResolvedValue({ ok: true, messages: opts.messages ?? [] })
   const harmony = {
     getMessages,
     getThreads: vi.fn().mockResolvedValue({ ok: true, threads: opts.threads ?? [] }),
     sendMessage: vi.fn().mockResolvedValue({ ok: false }),
+    editMessage: vi.fn().mockResolvedValue({ ok: false }),
+    deleteMessage: vi.fn().mockResolvedValue({ ok: true }),
+    react: vi.fn().mockResolvedValue({ ok: true }),
+    reactionUsers: vi.fn().mockResolvedValue({ ok: true, users: [] }),
+    ackChannel: vi.fn().mockResolvedValue(undefined),
+    startTyping: vi.fn().mockResolvedValue(undefined),
+    uploadAttachment: vi.fn().mockResolvedValue({ ok: true, ref: { id: '0', filename: 'x', uploaded_filename: 'u' } }),
     pinThread: vi.fn().mockResolvedValue(undefined),
     onMessage: vi.fn((cb: (e: LiveMessage) => void) => {
       onMsg = cb
       return () => {}
+    }),
+    onTyping: vi.fn((cb: (e: TypingEvent) => void) => {
+      onTyp = cb
+      return () => {}
     })
   }
   ;(window as unknown as { harmony: unknown }).harmony = harmony
-  render(
+  const { unmount } = render(
     <MessagePane
       selection={selection}
       channelNames={new Map()}
       pinnedThreadIds={opts.pinned ?? new Set()}
+      selfId={opts.selfId ?? 'u1'}
       onOpen={vi.fn()}
     />
   )
-  return { harmony, emit: (e: LiveMessage) => act(() => onMsg?.(e)) }
+  return {
+    harmony,
+    unmount,
+    emit: (e: LiveMessage) => act(() => onMsg?.(e)),
+    emitTyping: (e: TypingEvent) => act(() => onTyp?.(e))
+  }
 }
+
+const renderPane = (): ReturnType<typeof mount> => mount({ messages: [msg({ id: 'm1' })] })
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -154,5 +176,176 @@ describe('threads panel — FR-3 pin', () => {
     const row = (await screen.findByText(/design/)).closest('.ts-item') as HTMLElement
     expect(row).toHaveClass('pinned')
     expect(within(row).getByTitle('Unpin thread')).toBeInTheDocument()
+  })
+})
+
+describe('mark-as-read', () => {
+  it('acks the newest message once the channel loads', async () => {
+    const { harmony } = mount({
+      messages: [msg({ id: 'a' }), msg({ id: 'b' }), msg({ id: 'newest', content: 'the last one' })]
+    })
+    await screen.findByText('the last one')
+    expect(harmony.ackChannel).toHaveBeenCalledWith('c1', 'newest')
+  })
+
+  it('acks a live message that arrives while at the bottom', async () => {
+    const { harmony, emit } = mount({ messages: [msg({ id: 'a' })] })
+    await screen.findByText('hello')
+    harmony.ackChannel.mockClear()
+    emit({ kind: 'create', channelId: 'c1', message: msg({ id: 'live', content: 'new one' }) })
+    expect(harmony.ackChannel).toHaveBeenCalledWith('c1', 'live')
+  })
+})
+
+describe('per-channel drafts', () => {
+  it('persists the draft to localStorage and restores it', async () => {
+    const user = userEvent.setup()
+    const { unmount } = renderPane()
+    const box = await screen.findByRole('textbox')
+    await user.type(box, 'half a thought')
+    expect(localStorage.getItem('draft:c1')).toBe('half a thought')
+
+    unmount()
+    renderPane()
+    expect(await screen.findByRole('textbox')).toHaveValue('half a thought')
+  })
+
+  it('clears the draft after a successful send', async () => {
+    const user = userEvent.setup()
+    const { harmony } = renderPane()
+    harmony.sendMessage.mockResolvedValueOnce({ ok: true, message: msg({ id: 's', content: 'sent' }) })
+    const box = await screen.findByRole('textbox')
+    await user.type(box, 'ship it{Enter}')
+    expect(localStorage.getItem('draft:c1')).toBeNull()
+  })
+})
+
+describe('edit / delete own messages', () => {
+  it('edits via the hover toolbar', async () => {
+    const user = userEvent.setup()
+    const { harmony } = mount({
+      selfId: 'u1',
+      messages: [msg({ id: 'm1', authorId: 'u1', content: 'typo' })]
+    })
+    harmony.editMessage.mockResolvedValueOnce({
+      ok: true,
+      message: msg({ id: 'm1', authorId: 'u1', content: 'fixed' })
+    })
+    const row = (await screen.findByText('typo')).closest('.msg') as HTMLElement
+    await user.click(within(row).getByTitle('Edit'))
+    const editBox = within(row).getByRole('textbox')
+    await user.clear(editBox)
+    await user.type(editBox, 'fixed{Enter}')
+    expect(harmony.editMessage).toHaveBeenCalledWith('c1', 'm1', 'fixed')
+  })
+
+  it('does not offer edit/delete on other people’s messages', async () => {
+    mount({ selfId: 'u1', messages: [msg({ id: 'm1', authorId: 'someone-else' })] })
+    const row = (await screen.findByText('hello')).closest('.msg') as HTMLElement
+    expect(within(row).queryByTitle('Edit')).toBeNull()
+    expect(within(row).queryByTitle('Delete')).toBeNull()
+  })
+
+  it('deletes after confirming', async () => {
+    const user = userEvent.setup()
+    const { harmony } = mount({
+      selfId: 'u1',
+      messages: [msg({ id: 'm1', authorId: 'u1', content: 'oops' })]
+    })
+    const row = (await screen.findByText('oops')).closest('.msg') as HTMLElement
+    await user.click(within(row).getByTitle('Delete'))
+    await user.click(within(row).getByRole('button', { name: 'Delete' }))
+    expect(harmony.deleteMessage).toHaveBeenCalledWith('c1', 'm1')
+  })
+})
+
+describe('reactions', () => {
+  it('toggles an existing reaction pill', async () => {
+    const user = userEvent.setup()
+    const { harmony } = mount({
+      messages: [
+        msg({
+          id: 'm1',
+          reactions: [{ key: '👍', name: '👍', id: null, animated: false, count: 2, me: false }]
+        })
+      ]
+    })
+    const row = (await screen.findByText('hello')).closest('.msg') as HTMLElement
+    await user.click(within(row).getByText('2').closest('button')!)
+    expect(harmony.react).toHaveBeenCalledWith('c1', 'm1', '👍', true)
+    expect(within(row).getByText('3')).toBeInTheDocument() // optimistic
+  })
+
+  it('adds a reaction from the quick-react row', async () => {
+    const user = userEvent.setup()
+    const { harmony } = mount({ messages: [msg({ id: 'm1' })] })
+    const row = (await screen.findByText('hello')).closest('.msg') as HTMLElement
+    await user.click(within(row).getByTitle('Add reaction'))
+    await user.click(within(row).getByText('🎉'))
+    expect(harmony.react).toHaveBeenCalledWith('c1', 'm1', '🎉', true)
+  })
+
+  it('applies a live reaction event', async () => {
+    const { emit } = mount({ messages: [msg({ id: 'm1' })] })
+    await screen.findByText('hello')
+    emit({
+      kind: 'reaction',
+      channelId: 'c1',
+      messageId: 'm1',
+      emoji: { key: '🔥', name: '🔥', id: null, animated: false },
+      delta: 1,
+      me: false
+    })
+    expect(screen.getByText('1')).toBeInTheDocument()
+  })
+})
+
+describe('typing indicator', () => {
+  it('shows who is typing from an incoming event', async () => {
+    const { emitTyping } = mount({ messages: [msg({ id: 'm1' })], selfId: 'me' })
+    await screen.findByText('hello')
+    emitTyping({ channelId: 'c1', userId: 'u2', userName: 'Bob' })
+    expect(screen.getByText('Bob is typing…')).toBeInTheDocument()
+  })
+
+  it('ignores your own typing and other channels', async () => {
+    const { emitTyping } = mount({ messages: [msg({ id: 'm1' })], selfId: 'me' })
+    await screen.findByText('hello')
+    emitTyping({ channelId: 'c1', userId: 'me', userName: 'Me' })
+    emitTyping({ channelId: 'other', userId: 'u2', userName: 'Bob' })
+    expect(screen.queryByText(/is typing/)).toBeNull()
+  })
+
+  it('pings the typing endpoint as you type (throttled)', async () => {
+    const user = userEvent.setup()
+    const { harmony } = renderPane()
+    await user.type(await screen.findByRole('textbox'), 'abcdef')
+    expect(harmony.startTyping).toHaveBeenCalledTimes(1)
+    expect(harmony.startTyping).toHaveBeenCalledWith('c1')
+  })
+})
+
+describe('attachments', () => {
+  it('adds a chosen file as a pending chip and uploads it on send', async () => {
+    const user = userEvent.setup()
+    const { harmony } = renderPane()
+    await screen.findByText('hello')
+
+    const file = new File(['x'], 'shot.png', { type: 'image/png' })
+    Object.defineProperty(file, 'arrayBuffer', { value: async () => new ArrayBuffer(1) })
+    const input = document.querySelector('input[type=file]') as HTMLInputElement
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } })
+      await Promise.resolve()
+    })
+    expect(await screen.findByText('shot.png')).toBeInTheDocument()
+
+    harmony.sendMessage.mockResolvedValueOnce({ ok: true, message: msg({ id: 's' }) })
+    await user.click(screen.getByRole('button', { name: /Send/ }))
+    expect(harmony.uploadAttachment).toHaveBeenCalledWith(
+      'c1',
+      expect.objectContaining({ name: 'shot.png', type: 'image/png' })
+    )
+    expect(screen.queryByText('shot.png')).not.toBeInTheDocument() // tray cleared
   })
 })

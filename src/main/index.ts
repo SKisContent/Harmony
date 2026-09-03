@@ -1,9 +1,23 @@
 import { join } from 'node:path'
 import { BrowserWindow, app, ipcMain, shell } from 'electron'
 import type { UnifiedState } from '@shared/types'
+import type { UploadedAttachment } from '@shared/types'
 import { captureTokenViaLogin, clearToken, loadToken, saveToken } from './auth'
 import { Gateway } from './gateway'
-import { getMessages, getThreads, sendMessage } from './rest'
+import {
+  ackMessage,
+  addReaction,
+  deleteMessage,
+  editMessage,
+  getMessages,
+  getReactionUsers,
+  getThreads,
+  removeReaction,
+  sendMessage,
+  setMuted,
+  startTyping,
+  uploadAttachment
+} from './rest'
 import { Store } from './store'
 
 let win: BrowserWindow | null = null
@@ -29,6 +43,7 @@ store.on('change', () => {
 
 // live per-message deltas for the open channel — sent straight through, uncoalesced
 store.on('message', (evt) => win?.webContents.send('harmony:message', evt))
+store.on('typing', (evt) => win?.webContents.send('harmony:typing', evt))
 
 function startGateway(token: string): void {
   currentToken = token
@@ -130,11 +145,16 @@ ipcMain.handle('harmony:getThreads', async (_e, channelId: string) => {
 
 ipcMain.handle(
   'harmony:sendMessage',
-  async (_e, channelId: string, content: string, opts?: { replyToId?: string; pingReply?: boolean }) => {
+  async (
+    _e,
+    channelId: string,
+    content: string,
+    opts?: { replyToId?: string; pingReply?: boolean; attachments?: UploadedAttachment[] }
+  ) => {
     const token = currentToken ?? loadToken()
     if (!token) return { ok: false, error: 'Not signed in.' }
     const text = (content ?? '').trim()
-    if (!text) return { ok: false, error: 'Message is empty.' }
+    if (!text && !opts?.attachments?.length) return { ok: false, error: 'Message is empty.' }
     if (text.length > 2000) return { ok: false, error: 'Message is over 2000 characters.' }
     try {
       const message = await sendMessage(channelId, text, token, opts ?? {})
@@ -143,6 +163,62 @@ ipcMain.handle(
       return { ok: false, error: (e as Error).message }
     }
   }
+)
+
+function withToken<T>(
+  fn: (token: string) => Promise<T>
+): Promise<T | { ok: false; error: string }> {
+  const token = currentToken ?? loadToken()
+  if (!token) return Promise.resolve({ ok: false, error: 'Not signed in.' })
+  return fn(token).catch((e) => ({ ok: false, error: (e as Error).message }))
+}
+
+ipcMain.handle('harmony:editMessage', (_e, ch: string, id: string, content: string) =>
+  withToken(async (t) => ({ ok: true, message: await editMessage(ch, id, content, t) }))
+)
+ipcMain.handle('harmony:deleteMessage', (_e, ch: string, id: string) =>
+  withToken(async (t) => {
+    await deleteMessage(ch, id, t)
+    return { ok: true }
+  })
+)
+ipcMain.handle('harmony:react', (_e, ch: string, id: string, emoji: string, add: boolean) =>
+  withToken(async (t) => {
+    await (add ? addReaction : removeReaction)(ch, id, emoji, t)
+    return { ok: true }
+  })
+)
+ipcMain.handle('harmony:reactionUsers', (_e, ch: string, id: string, emoji: string) =>
+  withToken(async (t) => ({ ok: true, users: await getReactionUsers(ch, id, emoji, t) }))
+)
+ipcMain.handle('harmony:ackChannel', (_e, ch: string, id: string) => {
+  store.markReadLocal(ch, id)
+  const token = currentToken ?? loadToken()
+  if (token) void ackMessage(ch, id, token).catch(() => {})
+})
+ipcMain.handle(
+  'harmony:setMuted',
+  (_e, target: { guildId?: string; channelId?: string }, muted: boolean) => {
+    const guildId = target.guildId ?? '@me'
+    store.setMutedLocal(
+      target.channelId ?? target.guildId ?? '',
+      target.channelId ? 'channel' : 'guild',
+      muted
+    )
+    return withToken(async (t) => {
+      await setMuted(guildId, target.channelId, muted, t)
+      return { ok: true }
+    })
+  }
+)
+ipcMain.handle('harmony:startTyping', (_e, ch: string) => {
+  const token = currentToken ?? loadToken()
+  if (token) void startTyping(ch, token).catch(() => {})
+})
+ipcMain.handle(
+  'harmony:uploadAttachment',
+  (_e, ch: string, file: { name: string; type: string; bytes: Uint8Array }) =>
+    withToken(async (t) => ({ ok: true, ref: await uploadAttachment(ch, file, t) }))
 )
 
 // --- Harmony-local layout (FR-3 / FR-6 / FR-7) ---

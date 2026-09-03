@@ -393,6 +393,16 @@ export function App(): JSX.Element {
                           <span className={'presence ' + d.status} />
                         </span>
                         <span className="name">{d.name}</span>
+                        <button
+                          className={'mute-btn' + (d.muted ? ' on' : '')}
+                          title={d.muted ? 'Unmute conversation' : 'Mute conversation'}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            void window.harmony.setMuted({ channelId: d.id }, !d.muted)
+                          }}
+                        >
+                          {d.muted ? '🔕' : '🔔'}
+                        </button>
                         {d.mentionCount > 0 ? (
                           <span className="badge">{d.mentionCount}</span>
                         ) : d.unread ? (
@@ -436,9 +446,18 @@ export function App(): JSX.Element {
                 const pinnedIds = g.cats.filter((c) => c.pinned && c.id).map((c) => c.id as string)
                 return (
                   <section className="guild" key={g.id}>
-                    <div className="guild-head">
+                    <div className={'guild-head' + (g.muted ? ' is-muted' : '')}>
                       {g.iconUrl && <img src={g.iconUrl} alt="" />}
                       <span className="g-name">{g.name}</span>
+                      <button
+                        className={'mute-btn' + (g.muted ? ' on' : '')}
+                        title={g.muted ? 'Unmute server' : 'Mute server'}
+                        onClick={() =>
+                          void window.harmony.setMuted({ guildId: g.id }, !g.muted)
+                        }
+                      >
+                        {g.muted ? '🔕' : '🔔'}
+                      </button>
                       <span className="g-counts">
                         {gUnread ? `${gUnread}` : ''}
                         {gMentions ? ` · ${gMentions}✳` : ''}
@@ -534,6 +553,19 @@ export function App(): JSX.Element {
                                 >
                                   <span className="icon">{ICON.channel}</span>
                                   <span className="name">{c.name}</span>
+                                  <button
+                                    className={'mute-btn' + (c.muted ? ' on' : '')}
+                                    title={c.muted ? 'Unmute channel' : 'Mute channel'}
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      void window.harmony.setMuted(
+                                        { guildId: g.id, channelId: c.id },
+                                        !c.muted
+                                      )
+                                    }}
+                                  >
+                                    {c.muted ? '🔕' : '🔔'}
+                                  </button>
                                   {c.mentionCount > 0 ? (
                                     <span className="badge">{c.mentionCount}</span>
                                   ) : c.unread ? (
@@ -688,6 +720,7 @@ export function App(): JSX.Element {
               selection={selection}
               channelNames={channelNames}
               pinnedThreadIds={pinnedThreadIds}
+              selfId={state?.self?.id ?? ''}
               onOpen={setSelection}
             />
           </main>

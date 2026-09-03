@@ -356,6 +356,36 @@ export class Store extends EventEmitter {
         break
       }
 
+      case 'MESSAGE_REACTION_ADD':
+      case 'MESSAGE_REACTION_REMOVE': {
+        if (!d.message_id || !d.channel_id || !d.emoji) break
+        const e = d.emoji as { name: string | null; id: string | null; animated?: boolean }
+        this.emit('message', {
+          kind: 'reaction',
+          channelId: d.channel_id,
+          messageId: d.message_id,
+          emoji: {
+            key: e.id ? `${e.name ?? '_'}:${e.id}` : (e.name ?? ''),
+            name: e.name ?? '',
+            id: e.id,
+            animated: !!e.animated
+          },
+          delta: type === 'MESSAGE_REACTION_ADD' ? 1 : -1,
+          me: d.user_id === this.self?.id
+        })
+        break
+      }
+
+      case 'TYPING_START': {
+        if (!d.channel_id || !d.user_id) break
+        this.emit('typing', {
+          channelId: d.channel_id,
+          userId: d.user_id,
+          userName: this.userName(d.user_id)
+        })
+        break
+      }
+
       case 'MESSAGE_ACK': {
         const e: ReadStateEntry = this.readStates.get(d.channel_id) ?? { id: d.channel_id }
         e.last_message_id = d.message_id
@@ -364,7 +394,39 @@ export class Store extends EventEmitter {
         this.emit('change')
         break
       }
+
+      case 'USER_GUILD_SETTINGS_UPDATE': {
+        const gid: string | null = d.guild_id ?? null
+        if (gid) {
+          if (d.muted) this.mutedGuilds.add(gid)
+          else this.mutedGuilds.delete(gid)
+        }
+        for (const o of d.channel_overrides ?? []) {
+          if (o.muted) this.mutedChannels.add(o.channel_id)
+          else this.mutedChannels.delete(o.channel_id)
+        }
+        this.persist()
+        this.emit('change')
+        break
+      }
     }
+  }
+
+  /** Optimistic read-state bump so the sidebar clears before the gateway echoes. */
+  markReadLocal(channelId: string, messageId: string): void {
+    const e: ReadStateEntry = this.readStates.get(channelId) ?? { id: channelId }
+    e.last_message_id = messageId
+    e.mention_count = 0
+    this.readStates.set(channelId, e)
+    this.emit('change')
+  }
+
+  /** Optimistic mute toggle. */
+  setMutedLocal(id: string, kind: 'guild' | 'channel', muted: boolean): void {
+    const set = kind === 'guild' ? this.mutedGuilds : this.mutedChannels
+    if (muted) set.add(id)
+    else set.delete(id)
+    this.emit('change')
   }
 
   private upsertGuild(g: RawGuild): void {
@@ -521,6 +583,7 @@ export class Store extends EventEmitter {
         name,
         iconUrl: icon ? `https://cdn.discordapp.com/icons/${g.id}/${icon}.png?size=64` : null,
         position: 0,
+        muted: this.mutedGuilds.has(g.id),
         categories
       })
     }

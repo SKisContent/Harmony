@@ -1,7 +1,7 @@
 // Minimal authenticated REST client for Discord's private API.
 // Mirrors the web client's headers (docs/requirements.md §11.1 / NFR-5).
 
-import type { MessageRow } from '@shared/types'
+import type { MessageRow, UploadedAttachment } from '@shared/types'
 
 const BASE = 'https://discord.com/api/v9'
 
@@ -45,11 +45,16 @@ export async function apiGet<T = unknown>(path: string, token: string): Promise<
   return (await res.json()) as T
 }
 
-export async function apiPost<T = unknown>(path: string, token: string, payload: unknown): Promise<T> {
+async function apiSend<T = unknown>(
+  method: 'POST' | 'PATCH' | 'PUT' | 'DELETE',
+  path: string,
+  token: string,
+  payload?: unknown
+): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
-    method: 'POST',
+    method,
     headers: headers(token),
-    body: JSON.stringify(payload)
+    body: payload === undefined ? undefined : JSON.stringify(payload)
   })
   if (!res.ok) {
     const body = await res.text().catch(() => '')
@@ -64,7 +69,24 @@ export async function apiPost<T = unknown>(path: string, token: string, payload:
     }
     throw new Error(`${res.status} ${res.statusText} — ${body.slice(0, 200)}`)
   }
-  return (await res.json()) as T
+  if (res.status === 204) return undefined as T
+  const text = await res.text()
+  return (text ? JSON.parse(text) : undefined) as T
+}
+
+export const apiPost = <T = unknown>(path: string, token: string, payload: unknown): Promise<T> =>
+  apiSend<T>('POST', path, token, payload)
+export const apiPatch = <T = unknown>(path: string, token: string, payload: unknown): Promise<T> =>
+  apiSend<T>('PATCH', path, token, payload)
+export const apiPut = <T = unknown>(path: string, token: string, payload?: unknown): Promise<T> =>
+  apiSend<T>('PUT', path, token, payload)
+export const apiDelete = <T = unknown>(path: string, token: string): Promise<T> =>
+  apiSend<T>('DELETE', path, token)
+
+interface RawEmoji {
+  name: string | null
+  id: string | null
+  animated?: boolean
 }
 
 export interface RawMessage {
@@ -79,7 +101,13 @@ export interface RawMessage {
   attachments?: { filename: string; url: string; size: number }[]
   embeds?: unknown[]
   type?: number
+  reactions?: { emoji: RawEmoji; count: number; me: boolean }[]
   referenced_message?: { author?: { global_name?: string | null; username?: string } } | null
+}
+
+/** The token Discord's reaction endpoints want in the URL. */
+export function emojiKey(e: RawEmoji): string {
+  return e.id ? `${e.name ?? '_'}:${e.id}` : (e.name ?? '')
 }
 
 /** Normalise a raw Discord message (REST or gateway) into the renderer shape. */
@@ -101,6 +129,14 @@ export function toRow(m: RawMessage): MessageRow {
     mentions: (m.mentions ?? []).map((u) => ({
       id: u.id,
       name: u.global_name || u.username || 'user'
+    })),
+    reactions: (m.reactions ?? []).map((r) => ({
+      key: emojiKey(r.emoji),
+      name: r.emoji.name ?? '',
+      id: r.emoji.id,
+      animated: !!r.emoji.animated,
+      count: r.count,
+      me: r.me
     }))
   }
 }
@@ -120,6 +156,7 @@ export async function getMessages(
 export interface SendOptions {
   replyToId?: string
   pingReply?: boolean
+  attachments?: UploadedAttachment[]
 }
 
 export async function sendMessage(
@@ -137,8 +174,107 @@ export async function sendMessage(
     payload.message_reference = { channel_id: channelId, message_id: opts.replyToId }
     payload.allowed_mentions = { parse: ['users', 'roles', 'everyone'], replied_user: opts.pingReply !== false }
   }
+  if (opts.attachments?.length) payload.attachments = opts.attachments
   const created = await apiPost<RawMessage>(`/channels/${channelId}/messages`, token, payload)
   return toRow(created)
+}
+
+export async function editMessage(
+  channelId: string,
+  messageId: string,
+  content: string,
+  token: string
+): Promise<MessageRow> {
+  const updated = await apiPatch<RawMessage>(
+    `/channels/${channelId}/messages/${messageId}`,
+    token,
+    { content }
+  )
+  return toRow(updated)
+}
+
+export function deleteMessage(channelId: string, messageId: string, token: string): Promise<void> {
+  return apiDelete(`/channels/${channelId}/messages/${messageId}`, token)
+}
+
+export function addReaction(
+  channelId: string,
+  messageId: string,
+  emoji: string,
+  token: string
+): Promise<void> {
+  const e = encodeURIComponent(emoji)
+  return apiPut(`/channels/${channelId}/messages/${messageId}/reactions/${e}/@me`, token)
+}
+
+export function removeReaction(
+  channelId: string,
+  messageId: string,
+  emoji: string,
+  token: string
+): Promise<void> {
+  const e = encodeURIComponent(emoji)
+  return apiDelete(`/channels/${channelId}/messages/${messageId}/reactions/${e}/@me`, token)
+}
+
+export async function getReactionUsers(
+  channelId: string,
+  messageId: string,
+  emoji: string,
+  token: string
+): Promise<{ id: string; name: string }[]> {
+  const e = encodeURIComponent(emoji)
+  const raw = await apiGet<{ id: string; username?: string; global_name?: string | null }[]>(
+    `/channels/${channelId}/messages/${messageId}/reactions/${e}?limit=50`,
+    token
+  )
+  return raw.map((u) => ({ id: u.id, name: u.global_name || u.username || 'user' }))
+}
+
+export function ackMessage(channelId: string, messageId: string, token: string): Promise<void> {
+  return apiPost(`/channels/${channelId}/messages/${messageId}/ack`, token, { token: null })
+}
+
+export function startTyping(channelId: string, token: string): Promise<void> {
+  return apiPost(`/channels/${channelId}/typing`, token, {})
+}
+
+/**
+ * Mute or unmute a channel (or, with no channelId, the whole guild). Pass
+ * guildId `@me` for a DM channel.
+ */
+export function setMuted(
+  guildId: string,
+  channelId: string | undefined,
+  muted: boolean,
+  token: string
+): Promise<unknown> {
+  const muteConfig = muted ? { selected_time_window: -1, end_time: null } : null
+  const body = channelId
+    ? { channel_overrides: { [channelId]: { muted, mute_config: muteConfig } } }
+    : { muted, mute_config: muteConfig }
+  return apiPatch(`/users/@me/guilds/${guildId}/settings`, token, body)
+}
+
+export async function uploadAttachment(
+  channelId: string,
+  file: { name: string; type: string; bytes: Uint8Array },
+  token: string
+): Promise<UploadedAttachment> {
+  const slotRes = await apiPost<{
+    attachments: { id: number; upload_url: string; upload_filename: string }[]
+  }>(`/channels/${channelId}/attachments`, token, {
+    files: [{ filename: file.name, file_size: file.bytes.byteLength, id: '0' }]
+  })
+  const slot = slotRes.attachments[0]
+  const put = await fetch(slot.upload_url, {
+    method: 'PUT',
+    headers: { 'Content-Type': file.type || 'application/octet-stream' },
+    // undici accepts a Uint8Array body directly; the DOM lib types don't model it
+    body: file.bytes as unknown as BodyInit
+  })
+  if (!put.ok) throw new Error(`Attachment upload failed (${put.status})`)
+  return { id: '0', filename: file.name, uploaded_filename: slot.upload_filename }
 }
 
 interface RawThread {
