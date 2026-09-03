@@ -121,6 +121,19 @@ export function App(): JSX.Element {
       .filter((g) => g.categories.length > 0)
   }, [state, scope, unreadOnly, hideMuted, catSort])
 
+  // id -> name for every channel and joined thread, so <#id> mentions resolve
+  const channelNames = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const g of state?.guilds ?? [])
+      for (const cat of g.categories)
+        for (const c of cat.channels) {
+          m.set(c.id, c.name)
+          for (const t of c.threads) m.set(t.id, t.name)
+        }
+    for (const d of state?.dms ?? []) m.set(d.id, d.name)
+    return m
+  }, [state])
+
   const connected = state?.status === 'ready' || (state?.guilds.length ?? 0) > 0
 
   return (
@@ -397,7 +410,11 @@ export function App(): JSX.Element {
           </aside>
 
           <main className="content">
-            <MessagePane selection={selection} onOpen={setSelection} />
+            <MessagePane
+              selection={selection}
+              channelNames={channelNames}
+              onOpen={setSelection}
+            />
           </main>
         </div>
       )}

@@ -1,6 +1,8 @@
 // Minimal authenticated REST client for Discord's private API.
 // Mirrors the web client's headers (docs/requirements.md §11.1 / NFR-5).
 
+import type { MessageRow } from '@shared/types'
+
 const BASE = 'https://discord.com/api/v9'
 
 const CHROME_UA =
@@ -65,50 +67,53 @@ export async function apiPost<T = unknown>(path: string, token: string, payload:
   return (await res.json()) as T
 }
 
-interface RawMessage {
+export interface RawMessage {
   id: string
-  content: string
-  timestamp: string
-  edited_timestamp: string | null
-  author: { id: string; username: string; global_name: string | null }
+  content?: string
+  timestamp?: string
+  edited_timestamp?: string | null
+  channel_id?: string
+  author?: { id: string; username?: string; global_name?: string | null }
   member?: { nick?: string | null }
-  attachments: { filename: string; url: string; size: number }[]
-  embeds: unknown[]
-  type: number
+  mentions?: { id: string; username?: string; global_name?: string | null }[]
+  attachments?: { filename: string; url: string; size: number }[]
+  embeds?: unknown[]
+  type?: number
   referenced_message?: { author?: { global_name?: string | null; username?: string } } | null
 }
 
-export interface MessageRow {
-  id: string
-  authorId: string
-  authorName: string
-  content: string
-  timestamp: string
-  editedTimestamp: string | null
-  attachments: { name: string; url: string }[]
-  embedCount: number
-  replyTo: string | null
-  system: boolean
-}
-
-function toRow(m: RawMessage): MessageRow {
+/** Normalise a raw Discord message (REST or gateway) into the renderer shape. */
+export function toRow(m: RawMessage): MessageRow {
   return {
     id: m.id,
     authorId: m.author?.id ?? '',
     authorName: m.member?.nick || m.author?.global_name || m.author?.username || 'unknown',
     content: m.content ?? '',
-    timestamp: m.timestamp,
-    editedTimestamp: m.edited_timestamp,
+    timestamp: m.timestamp ?? '',
+    editedTimestamp: m.edited_timestamp ?? null,
     attachments: (m.attachments ?? []).map((a) => ({ name: a.filename, url: a.url })),
     embedCount: (m.embeds ?? []).length,
     replyTo:
       m.referenced_message?.author?.global_name ?? m.referenced_message?.author?.username ?? null,
-    system: m.type !== 0 && m.type !== 19 // 0 default, 19 reply
+    // 0 default, 19 reply — anything else is a system message. type may be absent
+    // on partial MESSAGE_UPDATE payloads, which are not system messages.
+    system: m.type != null && m.type !== 0 && m.type !== 19,
+    mentions: (m.mentions ?? []).map((u) => ({
+      id: u.id,
+      name: u.global_name || u.username || 'user'
+    }))
   }
 }
 
-export async function getMessages(channelId: string, token: string, limit = 50): Promise<MessageRow[]> {
-  const raw = await apiGet<RawMessage[]>(`/channels/${channelId}/messages?limit=${limit}`, token)
+export async function getMessages(
+  channelId: string,
+  token: string,
+  limit = 50,
+  before?: string
+): Promise<MessageRow[]> {
+  const q = new URLSearchParams({ limit: String(limit) })
+  if (before) q.set('before', before)
+  const raw = await apiGet<RawMessage[]>(`/channels/${channelId}/messages?${q}`, token)
   return raw.map(toRow).reverse() // API returns newest-first; show oldest-first
 }
 

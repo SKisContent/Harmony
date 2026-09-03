@@ -131,7 +131,15 @@ export interface MessageRow {
   embedCount: number
   replyTo: string | null
   system: boolean
+  /** users referenced by <@id> in this message, for mention rendering. */
+  mentions: { id: string; name: string }[]
 }
+
+/** A live change to a single message, pushed over IPC while a channel is open. */
+export type LiveMessage =
+  | { kind: 'create'; channelId: string; message: MessageRow }
+  | { kind: 'update'; channelId: string; message: MessageRow }
+  | { kind: 'delete'; channelId: string; id: string }
 
 export interface HarmonyApi {
   getState(): Promise<UnifiedState>
@@ -141,7 +149,8 @@ export interface HarmonyApi {
   logout(): Promise<void>
   reconnect(): Promise<void>
   getMessages(
-    channelId: string
+    channelId: string,
+    before?: string
   ): Promise<{ ok: boolean; messages?: MessageRow[]; error?: string }>
   sendMessage(
     channelId: string,
@@ -152,4 +161,6 @@ export interface HarmonyApi {
     channelId: string
   ): Promise<{ ok: boolean; threads?: ThreadSummary[]; error?: string }>
   onState(cb: (state: UnifiedState) => void): () => void
+  /** Live message create/update/delete for whichever channel is open. */
+  onMessage(cb: (evt: LiveMessage) => void): () => void
 }

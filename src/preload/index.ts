@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { HarmonyApi, UnifiedState } from '@shared/types'
+import type { HarmonyApi, LiveMessage, UnifiedState } from '@shared/types'
 
 const api: HarmonyApi = {
   getState: () => ipcRenderer.invoke('harmony:getState'),
@@ -7,7 +7,8 @@ const api: HarmonyApi = {
   setToken: (token: string) => ipcRenderer.invoke('harmony:setToken', token),
   logout: () => ipcRenderer.invoke('harmony:logout'),
   reconnect: () => ipcRenderer.invoke('harmony:reconnect'),
-  getMessages: (channelId: string) => ipcRenderer.invoke('harmony:getMessages', channelId),
+  getMessages: (channelId: string, before?: string) =>
+    ipcRenderer.invoke('harmony:getMessages', channelId, before),
   sendMessage: (
     channelId: string,
     content: string,
@@ -18,6 +19,11 @@ const api: HarmonyApi = {
     const listener = (_e: unknown, state: UnifiedState) => cb(state)
     ipcRenderer.on('harmony:state', listener)
     return () => ipcRenderer.removeListener('harmony:state', listener)
+  },
+  onMessage: (cb: (evt: LiveMessage) => void) => {
+    const listener = (_e: unknown, evt: LiveMessage) => cb(evt)
+    ipcRenderer.on('harmony:message', listener)
+    return () => ipcRenderer.removeListener('harmony:message', listener)
   }
 }
 

@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events'
 import { join } from 'node:path'
 import { app } from 'electron'
 import { readSecure, writeSecure } from './secure-file'
+import { toRow } from './rest'
 import {
   type CategoryGroup,
   type ChannelRow,
@@ -268,7 +269,21 @@ export class Store extends EventEmitter {
           rsEntry.mention_count = (rsEntry.mention_count ?? 0) + 1
           this.readStates.set(d.channel_id, rsEntry)
         }
+        this.emit('message', { kind: 'create', channelId: d.channel_id, message: toRow(d) })
         this.emit('change')
+        break
+      }
+
+      case 'MESSAGE_UPDATE': {
+        if (d.id && d.channel_id) {
+          this.emit('message', { kind: 'update', channelId: d.channel_id, message: toRow(d) })
+        }
+        break
+      }
+      case 'MESSAGE_DELETE': {
+        if (d.id && d.channel_id) {
+          this.emit('message', { kind: 'delete', channelId: d.channel_id, id: d.id })
+        }
         break
       }
 

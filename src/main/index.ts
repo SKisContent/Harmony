@@ -27,6 +27,9 @@ store.on('change', () => {
   }, 50)
 })
 
+// live per-message deltas for the open channel — sent straight through, uncoalesced
+store.on('message', (evt) => win?.webContents.send('harmony:message', evt))
+
 function startGateway(token: string): void {
   currentToken = token
   gateway?.disconnect()
@@ -101,11 +104,11 @@ ipcMain.handle('harmony:reconnect', () => {
   if (token) startGateway(token)
 })
 
-ipcMain.handle('harmony:getMessages', async (_e, channelId: string) => {
+ipcMain.handle('harmony:getMessages', async (_e, channelId: string, before?: string) => {
   const token = currentToken ?? loadToken()
   if (!token) return { ok: false, error: 'Not signed in.' }
   try {
-    const messages = await getMessages(channelId, token)
+    const messages = await getMessages(channelId, token, 50, before)
     return { ok: true, messages }
   } catch (e) {
     return { ok: false, error: (e as Error).message }
