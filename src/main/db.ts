@@ -1,9 +1,8 @@
-// The local SQLite store. Replaces the encrypted JSON snapshot: same idea (a
-// durable local mirror so the UI paints before the gateway reconnects), but
-// queryable and ready for the message index that FR-4 / FR-5 need.
+// The local SQLite store: a durable mirror of the gateway state so the UI can
+// paint before the gateway connects, plus a full-text index for retrieval.
 //
-// The DB is plaintext on disk (like Discord's own cache). The account token
-// stays in the OS keychain via secure-file — that's the secret that matters.
+// The DB is plaintext on disk. The account token is encrypted separately by
+// secure-file.
 
 import { join } from 'node:path'
 import { app } from 'electron'
@@ -14,8 +13,7 @@ const SCHEMA_VERSION = 2
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
--- guild blob keeps its embedded channels[] for now; a normalised channels
--- table lands with the FR nav work when the store stops being guild-centric.
+-- the guild blob carries its own channels[]; there is no separate channels table.
 CREATE TABLE IF NOT EXISTS guilds (
   id   TEXT PRIMARY KEY,
   name TEXT,
@@ -62,8 +60,7 @@ CREATE TABLE IF NOT EXISTS muted (
   kind TEXT NOT NULL          -- 'guild' | 'channel'
 );
 
--- message cache + full-text index. Defined now so there's no migration later;
--- populated by FR-4/FR-5 (mentions / my-messages) and cache-on-open.
+-- message cache and full-text index. No code writes to these yet.
 CREATE TABLE IF NOT EXISTS messages (
   id         TEXT PRIMARY KEY,
   channel_id TEXT NOT NULL,

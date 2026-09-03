@@ -100,7 +100,7 @@ interface GuildSettings {
   channel_overrides?: { channel_id: string; muted?: boolean }[]
 }
 
-const legacySnapshotPath = () => join(app.getPath('userData'), 'snapshot.bin')
+const snapshotFilePath = () => join(app.getPath('userData'), 'snapshot.bin')
 
 /** Owns the in-memory model and derives the UnifiedState the renderer renders. */
 export class Store extends EventEmitter {
@@ -769,7 +769,7 @@ export class Store extends EventEmitter {
   private loadFromDb(): void {
     try {
       let model = loadModel()
-      if (!model) model = this.importLegacySnapshot()
+      if (!model) model = this.loadSnapshotFile()
       if (!model) return
       this.applyModel(model)
       console.log('[store] loaded from db:', this.guilds.size, 'guilds')
@@ -779,9 +779,9 @@ export class Store extends EventEmitter {
     }
   }
 
-  /** One-time migration of the pre-SQLite encrypted snapshot.bin, if present. */
-  private importLegacySnapshot(): StoreModel | null {
-    const json = readSecure(legacySnapshotPath())
+  /** Read a `snapshot.bin` JSON file into the database when the DB is empty. */
+  private loadSnapshotFile(): StoreModel | null {
+    const json = readSecure(snapshotFilePath())
     if (!json) return null
     try {
       const s = JSON.parse(json)
@@ -798,10 +798,10 @@ export class Store extends EventEmitter {
         mutedChannels: s.mutedChannels ?? []
       }
       saveModel(model)
-      console.log('[store] migrated legacy snapshot.bin into sqlite')
+      console.log('[store] loaded snapshot.bin')
       return model
     } catch {
-      console.error('[store] legacy snapshot parse failed')
+      console.error('[store] snapshot.bin parse failed')
       return null
     }
   }

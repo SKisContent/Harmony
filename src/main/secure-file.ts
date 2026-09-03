@@ -3,19 +3,18 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from '
 import { dirname, join } from 'node:path'
 import { app, safeStorage } from 'electron'
 
-// Persist small secrets with a self-describing header so a later run can always
-// read back what an earlier run wrote.
+// Read/write a small secret to a file with a self-describing header:
 //
 //   "dev1\n"  -> base64(iv|tag|ciphertext), AES-256-GCM with a local key file
-//   "enc1\n"  -> base64(safeStorage ciphertext)          (OS keychain)
+//   "enc1\n"  -> base64(safeStorage ciphertext), i.e. the OS keychain
 //   "plain\n" -> utf8 plaintext
-//   otherwise -> legacy: try safeStorage, else treat whole file as utf8
+//   no header -> try safeStorage, else treat the whole file as utf8
 //
-// Why "dev1": an unsigned dev Electron on macOS keeps its safeStorage key in the
-// login Keychain, and the ACL is bound to the binary's ad-hoc signature. Running
-// it via automation or a re-signed/re-extracted binary makes Chromium mint a new
-// key, leaving every previously-encrypted file undecryptable. So in development
-// we encrypt with our own persistent key; packaged builds use the Keychain.
+// Packaged builds use safeStorage ("enc1"). Development uses the local key
+// ("dev1"): an unsigned Electron's safeStorage key lives in the login Keychain
+// under an ACL bound to the binary's ad-hoc signature, so launching it from a
+// different path or under automation makes Chromium mint a fresh key and orphan
+// everything encrypted with the old one.
 
 const DEVBOX = 'dev1\n'
 const ENC = 'enc1\n'
@@ -87,7 +86,7 @@ export function readSecure(path: string): string | null {
         const plain = safeStorage.decryptString(
           Buffer.from(buf.subarray(ENC.length).toString('utf8'), 'base64')
         )
-        // opportunistically migrate to the dev box so it survives the next launch
+        // in development, re-write in the dev1 format
         if (useDevBox()) writeSecure(path, plain)
         return plain
       } catch (e) {
@@ -103,7 +102,7 @@ export function readSecure(path: string): string | null {
       return s || null
     }
 
-    // legacy header-less file: an encrypted Buffer, or raw utf8
+    // header-less file: a safeStorage Buffer, or raw utf8
     try {
       const dec = safeStorage.decryptString(buf)
       writeSecure(path, dec)

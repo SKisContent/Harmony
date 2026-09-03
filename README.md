@@ -4,14 +4,12 @@
 
 Harmony is a desktop client for Discord that inverts the official app's defaults.
 Instead of one server at a time, a handful of "recent" threads, and per-server
-search, Harmony aims to show *everything you have access to* in one place and make
+search, Harmony shows *everything you have access to* in one place and treats
 retrieval — "where was I mentioned?", "what did I post?", "every thread in this
-channel" — a first-class feature.
+channel" — as a first-class feature.
 
-> **Status: early / pre-alpha.** A working vertical slice exists (sign-in,
-> unified channel list, message reading + posting + replies, threads, DMs with
-> presence). Large parts of the vision are not built yet. See
-> [Roadmap](#roadmap). macOS is the only platform exercised so far.
+> **Status: pre-alpha.** [Features](#features) lists what works and what does
+> not. macOS is the only tested platform.
 
 ---
 
@@ -26,7 +24,6 @@ channel" — a first-class feature.
 - [Usage](#usage)
 - [Project structure](#project-structure)
 - [Development](#development)
-- [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [Disclaimer](#disclaimer)
 - [License](#license)
@@ -56,28 +53,42 @@ The full product spec lives in [`docs/requirements.md`](docs/requirements.md).
 
 ## Features
 
-**Working today**
+**Works**
 
-- **Sign in once** via Discord's real login page (QR code recommended); session is
+- **Sign in** via Discord's real login page (QR code recommended). The session is
   stored encrypted and restored on launch.
 - **Unified channel list** — every text channel across every server in one tree,
   or scoped to a single server. Group DMs show their members inline.
-- **Category controls** — sort categories alphabetically or by most-recent
-  message; filter to unread only; hide muted channels.
-- **Threads** — joined threads in the sidebar, plus a per-channel panel listing
-  *all* threads (active **and** archived), not just the recent few.
+- **Category controls** — sort alphabetically or by most-recent message; filter
+  to unread only; hide muted channels.
+- **Pin threads** — from the sidebar or the per-channel panel; pinned threads
+  sort first. A **Pinned** mode lists every pinned thread across all servers with
+  a server › channel breadcrumb, reorder, and unpin.
+- **Pin, reorder, and collapse categories** — pinned categories float to the top
+  of a server; collapse state persists.
+- **Hide empty categories** — categories with no viewable channels (or, opt-in,
+  no unread) are hidden, with a per-server toggle to reveal them.
+- **Threads panel** — every thread in a channel, active **and** archived.
 - **Direct messages** — a dedicated mode with 1:1 and group DMs, live presence
   dots (online / idle / DND / offline), and group-member sublists.
-- **Read, post, and reply** — message history, a composer, and proper
-  reply-to-a-message with an optional ping toggle. Works in channels, threads,
-  and DMs.
-- **Offline-friendly** — an encrypted local snapshot paints the UI instantly on
-  launch, before the gateway reconnects.
+- **Read, post, and reply** — message history with scroll-back, live
+  create/edit/delete in the open channel, a composer, and reply-to-a-message with
+  an optional ping toggle. Works in channels, threads, and DMs.
+- **Markdown rendering** — bold/italic/code/quotes/spoilers, resolved
+  `@mentions` / `#channels`, custom emoji, `<t:…>` timestamps.
+- **Local SQLite store** — mirrors gateway state so the UI paints on launch
+  before the gateway connects. Includes an FTS5 table (not yet populated).
 
-**Planned** (not yet implemented): pin threads and categories, hide empty
-categories, a cross-server **Mentions inbox** and **My Messages** view with
-search-within, message **bookmarks**, Markdown/mention rendering, live updates in
-the open channel, scroll-back, SQLite + full-text index. See [Roadmap](#roadmap).
+**Not built**
+
+- Cross-server **Mentions inbox** and **My Messages** views with search-within.
+- Message **bookmarks**.
+- Global search UI / query language over the local index.
+- Attachments, emoji/sticker picker, `@`/`#`/`:` autocomplete, reactions,
+  edit/delete, typing indicator, mark-as-read, mute from Harmony.
+- Command palette and full keyboard navigation.
+- Desktop notifications.
+- Notarised builds; auto-update; Windows/Linux testing.
 
 Out of scope: voice, video, stage channels, and server administration.
 
@@ -85,7 +96,7 @@ Out of scope: voice, video, stage channels, and server administration.
 
 ## Screenshots
 
-_TODO: add screenshots once the UI stabilises._
+_None yet._
 
 ---
 
@@ -120,10 +131,8 @@ reverse-engineering notes) and [`docs/requirements.md`](docs/requirements.md)
 
 ### Prerequisites
 
-- **Node.js** 20+ (developed against a much newer version; Electron bundles its
-  own Node 20).
-- **macOS** — the only platform tested so far. Windows/Linux are not yet
-  supported.
+- **Node.js** 20+ (Electron bundles its own Node 20).
+- **macOS** — the only tested platform.
 - A **Discord account**.
 
 ### Install
@@ -273,40 +282,19 @@ Notes:
 
 ---
 
-## Roadmap
-
-Roughly in priority order:
-
-- [ ] Live message updates in the open channel; scroll-back / history paging
-- [ ] Markdown rendering; resolve `@mentions`, `#channels`, custom emoji
-- [ ] Pin threads, pin/reorder categories, hide empty categories
-- [ ] **Mentions inbox** — every message that tags you, across servers, searchable
-- [ ] **My Messages** — one-click list of everything you've posted, searchable
-- [ ] **Bookmarks** — save any message to a private, searchable list
-- [ ] Attachments, emoji/sticker picker, reactions, edit/delete, typing indicator
-- [ ] SQLite + full-text search index (replacing the JSON snapshot)
-- [ ] Windows / Linux builds; packaging, signing, auto-update
-- [ ] Tests
-
-The authoritative, detailed version is in
-[`docs/requirements.md`](docs/requirements.md).
-
----
-
 ## Contributing
 
-Contributions are welcome. This is an early project, so the most useful things
-right now are: trying it, filing issues with clear reproduction steps, and small
-focused pull requests.
+The full spec is in [`docs/requirements.md`](docs/requirements.md); the
+[Features](#features) list tracks what is and isn't built.
 
 - Discuss anything non-trivial in an issue first.
-- Keep PRs scoped to one change; run `npm run typecheck` before opening one.
+- Keep PRs scoped to one change. Run `npm run typecheck` and `npm test` before
+  opening one.
 - Match the surrounding code style.
 - By contributing you agree your work is licensed under the project's license
   (see below).
 
-_A `CONTRIBUTING.md` and issue/PR templates will be added as the project
-formalises._
+There is no `CONTRIBUTING.md` or issue/PR template.
 
 ---
 
@@ -329,8 +317,7 @@ No warranty of any kind. You are responsible for how you use it.
 
 ## License
 
-Not yet chosen. Until a `LICENSE` file is added, no permissions are granted beyond
-viewing the source. A permissive open-source license is intended.
+GNU General Public License v3.0. See [`LICENSE`](LICENSE).
 
 ---
 
