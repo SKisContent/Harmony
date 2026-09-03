@@ -22,6 +22,7 @@ channel" — a first-class feature.
 - [Screenshots](#screenshots)
 - [Architecture](#architecture)
 - [Getting started](#getting-started)
+- [Build & install locally](#build--install-locally)
 - [Usage](#usage)
 - [Project structure](#project-structure)
 - [Development](#development)
@@ -93,8 +94,8 @@ _TODO: add screenshots once the UI stabilises._
 - **Electron + React + TypeScript**, built with `electron-vite`.
 - The **main process** runs the sync engine: a WebSocket gateway client, a
   rate-limit-aware REST client, and an in-memory store that ingests gateway events
-  and derives the view model. It persists an encrypted JSON snapshot (SQLite is
-  planned).
+  and derives the view model. It mirrors state to a local SQLite database
+  (`better-sqlite3`), with a full-text index for retrieval.
 - The **renderer** is a React app. It never talks to Discord directly —
   everything goes through a small typed IPC surface (`window.harmony`).
 - **Auth**: Harmony authenticates as your own Discord account. It embeds Discord's
@@ -133,7 +134,7 @@ cd harmony
 npm install
 ```
 
-Two install quirks you may hit on a fresh machine (npm 11):
+Three install quirks you may hit on a fresh machine (npm 11):
 
 1. **Install scripts are gated.** `package.json` approves the ones needed via an
    `allowScripts` block. If Electron/esbuild postinstall didn't run:
@@ -153,6 +154,13 @@ Two install quirks you may hit on a fresh machine (npm 11):
    printf 'Electron.app/Contents/MacOS/Electron' > node_modules/electron/path.txt
    ```
 
+3. **The `better-sqlite3` native module** is rebuilt against Electron's ABI by a
+   `postinstall` step. If that was skipped or fails, run it yourself:
+
+   ```bash
+   npm run rebuild
+   ```
+
 ### Run
 
 ```bash
@@ -162,6 +170,51 @@ npm run dev
 Electron launches with a sign-in screen. Use the **QR code** in the pop-up window
 (scan it with the Discord mobile app) — no password or CAPTCHA needed. Your
 session is then remembered between launches.
+
+`npm run dev` is the development loop (renderer hot-reload; restart it after
+editing `src/main/**`). To run the app the way an end user would, build and
+install it — see below.
+
+---
+
+## Build & install locally
+
+To produce an installable macOS app bundle:
+
+```bash
+npm run dist:local
+```
+
+This writes **`dist/mac-arm64/Harmony.app`** — a real, code-signed[^sign] app —
+reusing the Electron runtime already in `node_modules/`, so it needs no network.
+The first run takes a couple of minutes (it rebuilds the `better-sqlite3` native
+module for the target and signs the ~250 MB bundle); later runs are quicker.
+`dist:local` targets **Apple Silicon**.
+
+| Command | Output |
+|---|---|
+| `npm run dist:local` | `dist/mac-arm64/Harmony.app` — arm64, unpacked, fully offline. |
+| `npm run dist` | Full set: `.dmg` + `.zip` (macOS arm64/x64), NSIS installer + `.zip` (Windows), `.AppImage` + `.deb` (Linux). Downloads the Electron runtime per target on first run, then caches it. |
+| push a `vX.Y.Z` tag | CI ([`.github/workflows/build.yml`](.github/workflows/build.yml)) builds all three platforms and opens a draft GitHub Release with the installers attached. |
+
+### Install (macOS)
+
+```bash
+cp -R dist/mac-arm64/Harmony.app /Applications/
+```
+
+The build is **not notarised**, so Gatekeeper blocks the first launch. Either
+right-click the app in Finder → **Open** → **Open**, or clear the quarantine
+flag:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Harmony.app
+```
+
+It launches normally after that. Sign in with the QR code as in [Run](#run).
+
+[^sign]: Signed with whatever code-signing identity is in your keychain, or
+ad-hoc if there is none — not an Apple-notarised Developer ID build.
 
 ---
 
@@ -191,7 +244,9 @@ harmony/
 │   ├── main/             Electron main: auth, gateway, REST, store, IPC
 │   ├── preload/          contextBridge -> window.harmony
 │   └── renderer/         React app (App, MessagePane, styles)
-├── electron.vite.config.ts
+├── electron.vite.config.ts  Bundling (main / preload / renderer)
+├── electron-builder.yml     App packaging (dmg / zip / nsis / AppImage / deb)
+├── vitest.config.ts
 ├── tsconfig.json
 └── package.json
 ```
@@ -202,16 +257,18 @@ harmony/
 
 | Command | What it does |
 |---|---|
-| `npm run dev` | Build main/preload, start the renderer dev server, launch Electron. |
-| `npm run typecheck` | `tsc --noEmit` over the whole project. |
-| `npm run build` | `electron-vite build` (packaging is not yet configured). |
+| `npm run dev` | Build main/preload, start the renderer dev server, launch Electron (renderer hot-reloads). |
+| `npm run typecheck` | `tsc --noEmit` over the whole project, tests included. |
+| `npm test` | Vitest unit + component suite (`npm run test:watch` to watch). |
+| `npm run build` | `electron-vite build` → `out/` (bundles only, no app packaging). |
+| `npm run dist:local` / `npm run dist` | Package an app bundle — see [Build & install locally](#build--install-locally). |
 
 Notes:
 
 - Editing files under `src/main/**` requires stopping and re-running `npm run dev`;
   the renderer hot-reloads on its own.
-- There is no test suite yet.
-- Local data (encrypted token + snapshot) lives in
+- Local data — the encrypted token, a dev encryption key (`dev-secret.key`), and
+  the SQLite database (`harmony.db`) — lives in
   `~/Library/Application Support/harmony/`. Delete it to start clean.
 
 ---
