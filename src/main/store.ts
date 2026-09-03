@@ -1,7 +1,8 @@
 import { EventEmitter } from 'node:events'
 import { join } from 'node:path'
 import { app } from 'electron'
-import { readSecure, writeSecure } from './secure-file'
+import { readSecure } from './secure-file'
+import { clearModel, loadModel, saveModel, type StoreModel } from './db'
 import { toRow } from './rest'
 import {
   type CategoryGroup,
@@ -84,7 +85,7 @@ interface GuildSettings {
   channel_overrides?: { channel_id: string; muted?: boolean }[]
 }
 
-const snapshotPath = () => join(app.getPath('userData'), 'snapshot.bin')
+const legacySnapshotPath = () => join(app.getPath('userData'), 'snapshot.bin')
 
 /** Owns the in-memory model and derives the UnifiedState the renderer renders. */
 export class Store extends EventEmitter {
@@ -104,7 +105,7 @@ export class Store extends EventEmitter {
 
   constructor() {
     super()
-    this.loadSnapshot()
+    this.loadFromDb()
   }
 
   setStatus(status: ConnectionStatus, detail?: string): void {
@@ -158,7 +159,7 @@ export class Store extends EventEmitter {
         this.syncedAt = Date.now()
         this.status = 'ready'
         this.detail = undefined
-        this.saveSnapshot()
+        this.persist()
         this.emit('change')
         break
       }
@@ -535,51 +536,92 @@ export class Store extends EventEmitter {
     this.self = null
     this.syncedAt = null
     this.status = 'no-token'
+    try {
+      clearModel()
+    } catch (e) {
+      console.error('[store] clear failed:', (e as Error).message)
+    }
     this.emit('change')
   }
 
-  // --- snapshot persistence (JSON via secure-file; SQLite replaces this next) ---
+  // --- local mirror (SQLite via db.ts) ------------------------------------
 
-  private saveSnapshot(): void {
-    try {
-      const json = JSON.stringify({
-        self: this.self,
-        guilds: [...this.guilds.values()],
-        threads: [...this.threads.values()],
-        dmChannels: [...this.dmChannels.values()],
-        users: [...this.users.values()],
-        presences: [...this.presences.entries()],
-        readStates: [...this.readStates.values()],
-        mutedGuilds: [...this.mutedGuilds],
-        mutedChannels: [...this.mutedChannels],
-        syncedAt: this.syncedAt
-      })
-      writeSecure(snapshotPath(), json)
-    } catch {
-      /* best effort */
+  private toModel(): StoreModel {
+    const rows = (v: Iterable<unknown>): Record<string, unknown>[] =>
+      [...v] as Record<string, unknown>[]
+    return {
+      self: this.self,
+      syncedAt: this.syncedAt,
+      guilds: rows(this.guilds.values()),
+      threads: rows(this.threads.values()),
+      dmChannels: rows(this.dmChannels.values()),
+      users: rows(this.users.values()),
+      presences: [...this.presences.entries()],
+      readStates: rows(this.readStates.values()),
+      mutedGuilds: [...this.mutedGuilds],
+      mutedChannels: [...this.mutedChannels]
     }
   }
 
-  private loadSnapshot(): void {
-    const json = readSecure(snapshotPath())
-    if (!json) return
+  private applyModel(s: StoreModel): void {
+    this.self = (s.self as UnifiedState['self']) ?? null
+    for (const g of s.guilds) this.guilds.set(String(g.id), g as unknown as RawGuild)
+    for (const t of s.threads) this.threads.set(String(t.id), t as unknown as RawThread)
+    for (const c of s.dmChannels) this.dmChannels.set(String(c.id), c as unknown as RawDm)
+    for (const u of s.users) this.users.set(String(u.id), u as unknown as RawUser)
+    for (const [id, st] of s.presences) this.presences.set(id, asStatus(st))
+    for (const e of s.readStates) this.readStates.set(String(e.id), e as unknown as ReadStateEntry)
+    this.rebuildDmUserIds()
+    this.mutedGuilds = new Set(s.mutedGuilds)
+    this.mutedChannels = new Set(s.mutedChannels)
+    this.syncedAt = s.syncedAt
+  }
+
+  private persist(): void {
+    try {
+      saveModel(this.toModel())
+    } catch (e) {
+      console.error('[store] persist failed:', (e as Error).message)
+    }
+  }
+
+  private loadFromDb(): void {
+    try {
+      let model = loadModel()
+      if (!model) model = this.importLegacySnapshot()
+      if (!model) return
+      this.applyModel(model)
+      console.log('[store] loaded from db:', this.guilds.size, 'guilds')
+      if (this.guilds.size > 0) this.status = 'ready'
+    } catch (e) {
+      console.error('[store] load failed:', (e as Error).message)
+    }
+  }
+
+  /** One-time migration of the pre-SQLite encrypted snapshot.bin, if present. */
+  private importLegacySnapshot(): StoreModel | null {
+    const json = readSecure(legacySnapshotPath())
+    if (!json) return null
     try {
       const s = JSON.parse(json)
-      this.self = s.self ?? null
-      for (const g of s.guilds ?? []) this.guilds.set(g.id, g)
-      for (const t of s.threads ?? []) this.threads.set(t.id, t)
-      for (const c of s.dmChannels ?? []) this.dmChannels.set(c.id, c)
-      for (const u of s.users ?? []) this.users.set(u.id, u)
-      for (const [id, st] of s.presences ?? []) this.presences.set(id, asStatus(st))
-      for (const e of s.readStates ?? []) this.readStates.set(e.id, e)
-      this.rebuildDmUserIds()
-      this.mutedGuilds = new Set(s.mutedGuilds ?? [])
-      this.mutedChannels = new Set(s.mutedChannels ?? [])
-      this.syncedAt = s.syncedAt ?? null
-      console.log('[store] snapshot loaded:', this.guilds.size, 'guilds')
-      if (this.guilds.size > 0) this.status = 'ready'
+      const model: StoreModel = {
+        self: s.self ?? null,
+        syncedAt: s.syncedAt ?? null,
+        guilds: s.guilds ?? [],
+        threads: s.threads ?? [],
+        dmChannels: s.dmChannels ?? [],
+        users: s.users ?? [],
+        presences: s.presences ?? [],
+        readStates: s.readStates ?? [],
+        mutedGuilds: s.mutedGuilds ?? [],
+        mutedChannels: s.mutedChannels ?? []
+      }
+      saveModel(model)
+      console.log('[store] migrated legacy snapshot.bin into sqlite')
+      return model
     } catch {
-      console.error('[store] snapshot parse failed')
+      console.error('[store] legacy snapshot parse failed')
+      return null
     }
   }
 }
