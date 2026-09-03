@@ -18,7 +18,8 @@
     "rebuild": "electron-rebuild -f -w better-sqlite3",
     "postinstall": "electron-rebuild -f -w better-sqlite3",
     "dist": "electron-vite build && electron-builder --publish never",
-    "dist:dir": "electron-vite build && electron-builder --dir"
+    "dist:dir": "electron-vite build && electron-builder --dir",
+    "dist:local": "electron-vite build && electron-builder --dir --arm64 -c.electronDist=node_modules/electron/dist"
   },
   "dependencies": {
     "better-sqlite3": "^11.10.0",
