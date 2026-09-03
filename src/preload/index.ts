@@ -61,6 +61,10 @@ const api: HarmonyApi = {
     ipcRenderer.invoke('harmony:setThreadPinMeta', threadId, patch),
   reorderPinnedThreads: (ids: string[]) =>
     ipcRenderer.invoke('harmony:reorderPinnedThreads', ids),
+  pinChannel: (channelId: string, guildId: string, pinned: boolean) =>
+    ipcRenderer.invoke('harmony:pinChannel', channelId, guildId, pinned),
+  reorderPinnedChannels: (ids: string[]) =>
+    ipcRenderer.invoke('harmony:reorderPinnedChannels', ids),
   setCategoryLayout: (
     categoryId: string,
     guildId: string,

@@ -1,5 +1,5 @@
 // Shared UnifiedState fixtures for renderer tests.
-import type { CategoryGroup, ThreadRow, UnifiedState } from '@shared/types'
+import type { ChannelRow, CategoryGroup, ThreadRow, UnifiedState } from '@shared/types'
 
 export function thread(over: Partial<ThreadRow> = {}): ThreadRow {
   return {
@@ -11,6 +11,24 @@ export function thread(over: Partial<ThreadRow> = {}): ThreadRow {
     unread: false,
     mentionCount: 0,
     pinned: false,
+    ...over
+  }
+}
+
+export function channel(over: Partial<ChannelRow> = {}): ChannelRow {
+  return {
+    id: 'c1',
+    guildId: 'g1',
+    name: 'general',
+    type: 0,
+    parentId: 'cat1',
+    position: 0,
+    unread: false,
+    mentionCount: 0,
+    muted: false,
+    pinned: false,
+    pinSortKey: 0,
+    threads: [],
     ...over
   }
 }
@@ -49,41 +67,22 @@ export function makeState(over: Partial<UnifiedState> = {}): UnifiedState {
             id: 'cat1',
             name: 'General',
             channels: [
-              {
+              channel({
                 id: 'c1',
-                guildId: 'g1',
                 name: 'general',
-                type: 0,
                 parentId: 'cat1',
-                position: 0,
-                unread: false,
-                mentionCount: 0,
-                muted: false,
                 threads: [
                   thread({ id: 't1', name: 'design-notes', pinned: false }),
                   thread({ id: 't2', name: 'standup', pinned: true })
                 ]
-              }
+              })
             ]
           }),
           category({
             id: 'cat2',
             name: 'Archive',
             hidden: true,
-            channels: [
-              {
-                id: 'c2',
-                guildId: 'g1',
-                name: 'old-stuff',
-                type: 0,
-                parentId: 'cat2',
-                position: 0,
-                unread: false,
-                mentionCount: 0,
-                muted: true,
-                threads: []
-              }
-            ]
+            channels: [channel({ id: 'c2', name: 'old-stuff', parentId: 'cat2', muted: true })]
           })
         ]
       }
@@ -91,6 +90,7 @@ export function makeState(over: Partial<UnifiedState> = {}): UnifiedState {
     local: {
       hideEmptyCategories: true,
       emptyMode: 'no-visible',
+      pinnedChannels: [],
       pinnedThreads: [
         {
           id: 't2',

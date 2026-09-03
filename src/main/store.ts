@@ -7,13 +7,16 @@ import {
   clearModel,
   loadLocalState,
   loadModel,
+  pinChannel,
   pinThread,
   reorderPinnedCategories,
+  reorderPinnedChannels,
   reorderPinnedThreads,
   saveModel,
   setCategoryLayout,
   setPref,
   type StoreModel,
+  unpinChannel,
   unpinThread,
   updateThreadPin
 } from './db'
@@ -25,6 +28,7 @@ import {
   type DmMemberRow,
   type DmRow,
   type GuildGroup,
+  type PinnedChannelView,
   type PinnedThreadView,
   type PresenceStatus,
   type ThreadRow,
@@ -117,7 +121,7 @@ export class Store extends EventEmitter {
   private mutedGuilds = new Set<string>()
   private mutedChannels = new Set<string>()
   private syncedAt: number | null = null
-  private local: LocalState = { prefs: {}, pinnedThreads: [], categoryLayout: {} }
+  private local: LocalState = { prefs: {}, pinnedThreads: [], pinnedChannels: [], categoryLayout: {} }
 
   constructor() {
     super()
@@ -156,6 +160,19 @@ export class Store extends EventEmitter {
 
   reorderPinnedThreads(ids: string[]): void {
     reorderPinnedThreads(ids)
+    this.reloadLocal()
+    this.emit('change')
+  }
+
+  setChannelPinned(channelId: string, guildId: string, pinned: boolean): void {
+    if (pinned) pinChannel(channelId, guildId, this.local.pinnedChannels.length)
+    else unpinChannel(channelId)
+    this.reloadLocal()
+    this.emit('change')
+  }
+
+  reorderPinnedChannels(ids: string[]): void {
+    reorderPinnedChannels(ids)
     this.reloadLocal()
     this.emit('change')
   }
@@ -446,6 +463,7 @@ export class Store extends EventEmitter {
     let channelTotal = 0
 
     const pinnedThreadIds = new Set(this.local.pinnedThreads.map((p) => p.threadId))
+    const pinnedChannelMap = new Map(this.local.pinnedChannels.map((p) => [p.channelId, p]))
     const { categoryLayout } = this.local
     const hideEmptyCategories = this.local.prefs.hideEmptyCategories !== '0'
     const emptyMode: UnifiedState['local']['emptyMode'] =
@@ -504,6 +522,7 @@ export class Store extends EventEmitter {
         const mentionCount = rs?.mention_count ?? 0
         if (unread) unreadTotal++
         mentionTotal += mentionCount
+        const pin = pinnedChannelMap.get(c.id)
         const row: ChannelRow = {
           id: c.id,
           guildId: g.id,
@@ -514,6 +533,8 @@ export class Store extends EventEmitter {
           unread,
           mentionCount,
           muted: this.mutedGuilds.has(g.id) || this.mutedChannels.has(c.id),
+          pinned: !!pin,
+          pinSortKey: pin?.sortKey ?? 0,
           threads: threadsByParent.get(c.id) ?? []
         }
         const key = c.parent_id && categoryNames.has(c.parent_id) ? c.parent_id : ''
@@ -522,7 +543,13 @@ export class Store extends EventEmitter {
 
       const categories: CategoryGroup[] = []
       for (const [key, rows] of buckets) {
-        rows.sort((a, b) => a.position - b.position || a.name.localeCompare(b.name))
+        rows.sort(
+          (a, b) =>
+            Number(b.pinned) - Number(a.pinned) ||
+            a.pinSortKey - b.pinSortKey ||
+            a.position - b.position ||
+            a.name.localeCompare(b.name)
+        )
         const recentActivity = rows.reduce((max, r) => {
           const raw = this.guilds.get(g.id)?.channels?.find((c) => c.id === r.id)?.last_message_id
           return raw && BigInt(raw) > BigInt(max) ? raw : max
@@ -608,9 +635,50 @@ export class Store extends EventEmitter {
       local: {
         hideEmptyCategories,
         emptyMode,
-        pinnedThreads: this.buildPinnedThreads()
+        pinnedThreads: this.buildPinnedThreads(),
+        pinnedChannels: this.buildPinnedChannels()
       }
     }
+  }
+
+  /** Resolve every pinned channel for the global "Pinned" view (Q14). */
+  private buildPinnedChannels(): PinnedChannelView[] {
+    return this.local.pinnedChannels.map((p) => {
+      const g = this.guilds.get(p.guildId)
+      const ch = g?.channels?.find((c) => c.id === p.channelId)
+      const guildName = g?.properties?.name ?? g?.name ?? ''
+      if (!g || !ch) {
+        return {
+          id: p.channelId,
+          name: 'Removed channel',
+          guildId: p.guildId,
+          guildName,
+          categoryName: '',
+          unread: false,
+          mentionCount: 0,
+          muted: false,
+          sortKey: p.sortKey,
+          missing: true
+        }
+      }
+      const rs = this.readStates.get(ch.id)
+      const unread =
+        !!ch.last_message_id &&
+        (!rs?.last_message_id || BigInt(ch.last_message_id) > BigInt(rs.last_message_id))
+      const cat = ch.parent_id ? g.channels?.find((c) => c.id === ch.parent_id) : undefined
+      return {
+        id: ch.id,
+        name: ch.name ?? 'channel',
+        guildId: g.id,
+        guildName,
+        categoryName: cat?.name ?? '',
+        unread,
+        mentionCount: rs?.mention_count ?? 0,
+        muted: this.mutedGuilds.has(g.id) || this.mutedChannels.has(ch.id),
+        sortKey: p.sortKey,
+        missing: false
+      }
+    })
   }
 
   /** Resolve every pinned thread id for the global "Pinned" view (FR-3 / Q14). */

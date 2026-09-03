@@ -231,6 +231,12 @@ ipcMain.handle(
   (_e, threadId: string, patch: { note?: string | null; label?: string | null }) =>
     store.setThreadPinMeta(threadId, patch ?? {})
 )
+ipcMain.handle('harmony:pinChannel', (_e, channelId: string, guildId: string, pinned: boolean) =>
+  store.setChannelPinned(channelId, guildId, pinned)
+)
+ipcMain.handle('harmony:reorderPinnedChannels', (_e, ids: string[]) =>
+  store.reorderPinnedChannels(ids ?? [])
+)
 ipcMain.handle('harmony:reorderPinnedThreads', (_e, ids: string[]) =>
   store.reorderPinnedThreads(ids ?? [])
 )

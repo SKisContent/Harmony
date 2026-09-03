@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { UnifiedState } from '@shared/types'
 import { App } from './App'
-import { makeState } from './test-fixtures'
+import { channel, makeState } from './test-fixtures'
 
 type Harmony = Window['harmony']
 
@@ -39,6 +39,8 @@ function mountApp(state: UnifiedState = makeState()): {
     pinThread: vi.fn().mockResolvedValue(undefined),
     setThreadPinMeta: vi.fn().mockResolvedValue(undefined),
     reorderPinnedThreads: vi.fn().mockResolvedValue(undefined),
+    pinChannel: vi.fn().mockResolvedValue(undefined),
+    reorderPinnedChannels: vi.fn().mockResolvedValue(undefined),
     setCategoryLayout: vi.fn().mockResolvedValue(undefined),
     reorderPinnedCategories: vi.fn().mockResolvedValue(undefined)
   }
@@ -145,18 +147,7 @@ describe('FR-7 — pin / collapse / reorder categories', () => {
       pinned: true,
       pinSortKey: 1,
       channels: [
-        {
-          id: 'c2',
-          guildId: 'g1',
-          name: 'zeta-chan',
-          type: 0,
-          parentId: 'cat2',
-          position: 0,
-          unread: false,
-          mentionCount: 0,
-          muted: false,
-          threads: []
-        }
+        channel({ id: 'c2', name: 'zeta-chan', parentId: 'cat2' })
       ]
     }
     s.guilds[0].categories.push({
@@ -165,18 +156,7 @@ describe('FR-7 — pin / collapse / reorder categories', () => {
       position: 2,
       recentActivity: '0',
       channels: [
-        {
-          id: 'c3',
-          guildId: 'g1',
-          name: 'alpha-chan',
-          type: 0,
-          parentId: 'cat3',
-          position: 0,
-          unread: false,
-          mentionCount: 0,
-          muted: false,
-          threads: []
-        }
+        channel({ id: 'c3', name: 'alpha-chan', parentId: 'cat3' })
       ],
       pinned: true,
       pinSortKey: 0,
@@ -200,20 +180,7 @@ describe('FR-7 — pin / collapse / reorder categories', () => {
       hidden: false,
       pinned: true,
       pinSortKey: 1,
-      channels: [
-        {
-          id: 'c2',
-          guildId: 'g1',
-          name: 'old-stuff',
-          type: 0,
-          parentId: 'cat2',
-          position: 0,
-          unread: false,
-          mentionCount: 0,
-          muted: false,
-          threads: []
-        }
-      ]
+      channels: [channel({ id: 'c2', name: 'old-stuff', parentId: 'cat2' })]
     }
     const { harmony } = mountApp(s)
 
@@ -304,5 +271,74 @@ describe('FR-3 — pin threads', () => {
     await user.click(screen.getByText('Removed thread'))
     // the click is inert — the message pane still has nothing selected
     expect(screen.getByText('Pick a channel on the left to read it.')).toBeInTheDocument()
+  })
+})
+
+describe('channel pinning', () => {
+  it('pins a channel from the sidebar row', async () => {
+    const user = userEvent.setup()
+    const { harmony } = mountApp()
+    const row = (await screen.findByText('general')).closest('.chan')!
+    await user.click(within(row as HTMLElement).getByTitle('Pin channel'))
+    expect(harmony.pinChannel).toHaveBeenCalledWith('c1', 'g1', true)
+  })
+
+  it('marks a pinned channel row and lists it in the Pinned view', async () => {
+    const user = userEvent.setup()
+    const s = makeState()
+    s.guilds[0].categories[0].channels[0] = channel({
+      id: 'c1',
+      name: 'general',
+      pinned: true,
+      threads: s.guilds[0].categories[0].channels[0].threads
+    })
+    s.local.pinnedChannels = [
+      {
+        id: 'c1',
+        name: 'general',
+        guildId: 'g1',
+        guildName: 'Acme',
+        categoryName: 'General',
+        unread: false,
+        mentionCount: 0,
+        muted: false,
+        sortKey: 0,
+        missing: false
+      }
+    ]
+    mountApp(s)
+
+    expect((await screen.findByText('general')).closest('.chan')).toHaveClass('is-pinned')
+
+    await user.click(screen.getByRole('button', { name: /^Pinned/ }))
+    const row = screen.getByText('general').closest('.pin-row')!
+    expect(within(row as HTMLElement).getByText(/Acme › General/)).toBeInTheDocument()
+  })
+
+  it('unpins and reorders channels from the Pinned view', async () => {
+    const user = userEvent.setup()
+    const s = makeState()
+    const mk = (id: string, name: string, sortKey: number) => ({
+      id,
+      name,
+      guildId: 'g1',
+      guildName: 'Acme',
+      categoryName: 'General',
+      unread: false,
+      mentionCount: 0,
+      muted: false,
+      sortKey,
+      missing: false
+    })
+    s.local.pinnedChannels = [mk('c1', 'first', 0), mk('c9', 'second', 1)]
+    const { harmony } = mountApp(s)
+
+    await user.click(await screen.findByRole('button', { name: /^Pinned/ }))
+    const row = screen.getByText('first').closest('.pin-row')!
+    await user.click(within(row as HTMLElement).getByTitle('Unpin'))
+    expect(harmony.pinChannel).toHaveBeenCalledWith('c1', 'g1', false)
+
+    await user.click(within(row as HTMLElement).getByTitle('Move down'))
+    expect(harmony.reorderPinnedChannels).toHaveBeenCalledWith(['c9', 'c1'])
   })
 })

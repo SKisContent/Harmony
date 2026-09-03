@@ -209,6 +209,15 @@ export function App(): JSX.Element {
     void window.harmony.reorderPinnedThreads(ids)
   }
 
+  const movePinnedChannel = (id: string, dir: -1 | 1): void => {
+    const ids = (state?.local.pinnedChannels ?? []).map((p) => p.id)
+    const i = ids.indexOf(id)
+    const j = i + dir
+    if (i < 0 || j < 0 || j >= ids.length) return
+    ;[ids[i], ids[j]] = [ids[j], ids[i]]
+    void window.harmony.reorderPinnedChannels(ids)
+  }
+
   return (
     <div className="app">
       <header className="topbar">
@@ -287,7 +296,10 @@ export function App(): JSX.Element {
                 onClick={() => setMode('pinned')}
               >
                 Pinned
-                {state && state.local.pinnedThreads.some((p) => p.unread) ? (
+                {state &&
+                [...state.local.pinnedThreads, ...state.local.pinnedChannels].some(
+                  (p) => p.unread
+                ) ? (
                   <span className="seg-dot" />
                 ) : null}
               </button>
@@ -538,6 +550,7 @@ export function App(): JSX.Element {
                                 <div
                                   className={
                                     'chan' +
+                                    (c.pinned ? ' is-pinned' : '') +
                                     (c.unread ? ' is-unread' : '') +
                                     (c.muted ? ' is-muted' : '') +
                                     (selection?.channelId === c.id ? ' is-active' : '')
@@ -553,6 +566,16 @@ export function App(): JSX.Element {
                                 >
                                   <span className="icon">{ICON.channel}</span>
                                   <span className="name">{c.name}</span>
+                                  <button
+                                    className={'pin-btn' + (c.pinned ? ' on' : '')}
+                                    title={c.pinned ? 'Unpin channel' : 'Pin channel'}
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      void window.harmony.pinChannel(c.id, g.id, !c.pinned)
+                                    }}
+                                  >
+                                    📌
+                                  </button>
                                   <button
                                     className={'mute-btn' + (c.muted ? ' on' : '')}
                                     title={c.muted ? 'Unmute channel' : 'Mute channel'}
@@ -633,10 +656,89 @@ export function App(): JSX.Element {
 
             {mode === 'pinned' && (
               <div className="list">
-                {(state?.local.pinnedThreads ?? []).length === 0 && (
-                  <div className="empty small">
-                    No pinned threads. Hover a thread in the sidebar and hit 📌.
+                {(state?.local.pinnedChannels ?? []).length === 0 &&
+                  (state?.local.pinnedThreads ?? []).length === 0 && (
+                    <div className="empty small">
+                      Nothing pinned. Hover a channel or thread in the sidebar and hit 📌.
+                    </div>
+                  )}
+
+                {(state?.local.pinnedChannels ?? []).length > 0 && (
+                  <div className="ts-label">Channels</div>
+                )}
+                {(state?.local.pinnedChannels ?? []).map((p, i, arr) => (
+                  <div
+                    key={p.id}
+                    className={
+                      'pin-row' +
+                      (p.missing ? ' is-missing' : '') +
+                      (p.unread ? ' is-unread' : '') +
+                      (selection?.channelId === p.id ? ' is-active' : '')
+                    }
+                    onClick={() =>
+                      !p.missing &&
+                      setSelection({
+                        guildId: p.guildId,
+                        guildName: p.guildName,
+                        channelId: p.id,
+                        channelName: p.name
+                      })
+                    }
+                  >
+                    <span className="icon">{ICON.channel}</span>
+                    <div className="pin-body">
+                      <div className="pin-title">
+                        {p.name}
+                        {p.missing && <span className="pin-tag warn">removed from Discord</span>}
+                      </div>
+                      {!p.missing && (
+                        <div className="pin-crumb">
+                          {p.guildName}
+                          {p.categoryName ? ` › ${p.categoryName}` : ''}
+                        </div>
+                      )}
+                    </div>
+                    {p.mentionCount > 0 ? (
+                      <span className="badge">{p.mentionCount}</span>
+                    ) : p.unread ? (
+                      <span className="dot" />
+                    ) : null}
+                    <span className="pin-actions">
+                      <button
+                        title="Move up"
+                        disabled={i === 0}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          movePinnedChannel(p.id, -1)
+                        }}
+                      >
+                        ↑
+                      </button>
+                      <button
+                        title="Move down"
+                        disabled={i === arr.length - 1}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          movePinnedChannel(p.id, 1)
+                        }}
+                      >
+                        ↓
+                      </button>
+                      <button
+                        title="Unpin"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          void window.harmony.pinChannel(p.id, p.guildId, false)
+                        }}
+                      >
+                        ✕
+                      </button>
+                    </span>
                   </div>
+                ))}
+
+                {(state?.local.pinnedThreads ?? []).length > 0 && (
+                  <div className="ts-label">Threads</div>
                 )}
                 {(state?.local.pinnedThreads ?? []).map((p, i, arr) => (
                   <div

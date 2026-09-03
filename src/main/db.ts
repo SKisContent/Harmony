@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { app } from 'electron'
 import Database from 'better-sqlite3'
 
-const SCHEMA_VERSION = 2
+const SCHEMA_VERSION = 3
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -89,6 +89,13 @@ CREATE TABLE IF NOT EXISTS pinned_threads (
   sort_key  REAL NOT NULL,
   note      TEXT,
   label     TEXT
+);
+
+CREATE TABLE IF NOT EXISTS pinned_channels (
+  channel_id TEXT PRIMARY KEY,
+  guild_id   TEXT NOT NULL,
+  added_at   INTEGER NOT NULL,
+  sort_key   REAL NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS category_layout (
@@ -248,9 +255,17 @@ export interface CategoryLayoutRow {
   force: 'show' | 'hide' | null
 }
 
+export interface PinnedChannelRow {
+  channelId: string
+  guildId: string
+  addedAt: number
+  sortKey: number
+}
+
 export interface LocalState {
   prefs: Record<string, string>
   pinnedThreads: PinnedThreadRow[]
+  pinnedChannels: PinnedChannelRow[]
   categoryLayout: Record<string, CategoryLayoutRow>
 }
 
@@ -282,6 +297,17 @@ export function loadLocalState(): LocalState {
     label: r.label
   }))
 
+  const pinnedChannels = (
+    d
+      .prepare('SELECT channel_id, guild_id, added_at, sort_key FROM pinned_channels ORDER BY sort_key')
+      .all() as { channel_id: string; guild_id: string; added_at: number; sort_key: number }[]
+  ).map((r) => ({
+    channelId: r.channel_id,
+    guildId: r.guild_id,
+    addedAt: r.added_at,
+    sortKey: r.sort_key
+  }))
+
   const categoryLayout: Record<string, CategoryLayoutRow> = {}
   for (const r of d
     .prepare('SELECT category_id, guild_id, pinned, sort_key, collapsed, force FROM category_layout')
@@ -302,7 +328,7 @@ export function loadLocalState(): LocalState {
     }
   }
 
-  return { prefs, pinnedThreads, categoryLayout }
+  return { prefs, pinnedThreads, pinnedChannels, categoryLayout }
 }
 
 export function setPref(key: string, value: string): void {
@@ -343,6 +369,26 @@ export function updateThreadPin(
 export function reorderPinnedThreads(orderedIds: string[]): void {
   const d = db()
   const upd = d.prepare('UPDATE pinned_threads SET sort_key = ? WHERE thread_id = ?')
+  const run = d.transaction((ids: string[]) => ids.forEach((id, i) => upd.run(i, id)))
+  run(orderedIds)
+}
+
+export function pinChannel(channelId: string, guildId: string, sortKey: number): void {
+  db()
+    .prepare(
+      `INSERT INTO pinned_channels (channel_id, guild_id, added_at, sort_key) VALUES (?, ?, ?, ?)
+       ON CONFLICT(channel_id) DO NOTHING`
+    )
+    .run(channelId, guildId, Date.now(), sortKey)
+}
+
+export function unpinChannel(channelId: string): void {
+  db().prepare('DELETE FROM pinned_channels WHERE channel_id = ?').run(channelId)
+}
+
+export function reorderPinnedChannels(orderedIds: string[]): void {
+  const d = db()
+  const upd = d.prepare('UPDATE pinned_channels SET sort_key = ? WHERE channel_id = ?')
   const run = d.transaction((ids: string[]) => ids.forEach((id, i) => upd.run(i, id)))
   run(orderedIds)
 }

@@ -5,7 +5,7 @@ vi.mock('electron', () => ({ app: { getPath: () => '/tmp/harmony-test' } }))
 vi.mock('./secure-file', () => ({ readSecure: () => null }))
 
 const mockDb = vi.hoisted(() => {
-  const empty: LocalState = { prefs: {}, pinnedThreads: [], categoryLayout: {} }
+  const empty: LocalState = { prefs: {}, pinnedThreads: [], pinnedChannels: [], categoryLayout: {} }
   return {
     loadModel: vi.fn(() => null),
     saveModel: vi.fn(),
@@ -16,6 +16,9 @@ const mockDb = vi.hoisted(() => {
     unpinThread: vi.fn(),
     updateThreadPin: vi.fn(),
     reorderPinnedThreads: vi.fn(),
+    pinChannel: vi.fn(),
+    unpinChannel: vi.fn(),
+    reorderPinnedChannels: vi.fn(),
     setCategoryLayout: vi.fn(),
     reorderPinnedCategories: vi.fn()
   }
@@ -26,7 +29,7 @@ vi.mock('./db', () => mockDb)
 import { Store } from './store'
 
 function local(over: Partial<LocalState> = {}): LocalState {
-  return { prefs: {}, pinnedThreads: [], categoryLayout: {}, ...over }
+  return { prefs: {}, pinnedThreads: [], pinnedChannels: [], categoryLayout: {}, ...over }
 }
 
 /** A minimal READY payload: one guild, one category, `channels` text channels. */
@@ -276,5 +279,67 @@ describe('FR-3 — pin threads', () => {
 
     store.setThreadPinned('t9', false)
     expect(mockDb.unpinThread).toHaveBeenCalledWith('t9')
+  })
+})
+
+describe('channel pinning', () => {
+  it('flags pinned channels and sorts them ahead of the rest within a category', () => {
+    const store = newStore(
+      local({
+        pinnedChannels: [{ channelId: 'c2', guildId: 'g1', addedAt: 1, sortKey: 0 }]
+      })
+    )
+    store.ingest(
+      'READY',
+      ready({
+        channels: [
+          { id: 'c1', name: 'aaa' },
+          { id: 'c2', name: 'zzz' }
+        ]
+      })
+    )
+
+    const channels = store.getState().guilds[0].categories[0].channels
+    expect(channels.map((c) => c.name)).toEqual(['zzz', 'aaa'])
+    expect(channels.find((c) => c.id === 'c2')!.pinned).toBe(true)
+    expect(channels.find((c) => c.id === 'c1')!.pinned).toBe(false)
+  })
+
+  it('builds the pinned-channel view with guild and category context', () => {
+    const store = newStore(
+      local({ pinnedChannels: [{ channelId: 'c1', guildId: 'g1', addedAt: 1, sortKey: 0 }] })
+    )
+    store.ingest('READY', ready({ channels: [{ id: 'c1', name: 'general' }] }))
+
+    const [pin] = store.getState().local.pinnedChannels
+    expect(pin).toMatchObject({
+      id: 'c1',
+      name: 'general',
+      guildName: 'Acme',
+      categoryName: 'General',
+      missing: false
+    })
+  })
+
+  it('keeps a tombstone for a pinned channel we can no longer see', () => {
+    const store = newStore(
+      local({ pinnedChannels: [{ channelId: 'ghost', guildId: 'g1', addedAt: 1, sortKey: 0 }] })
+    )
+    store.ingest('READY', ready({ channels: [{ id: 'c1', name: 'general' }] }))
+
+    const [pin] = store.getState().local.pinnedChannels
+    expect(pin.missing).toBe(true)
+    expect(pin.id).toBe('ghost')
+  })
+
+  it('setChannelPinned routes to db and re-derives', () => {
+    const store = newStore()
+    store.ingest('READY', ready({ channels: [{ id: 'c1', name: 'general' }] }))
+
+    store.setChannelPinned('c1', 'g1', true)
+    expect(mockDb.pinChannel).toHaveBeenCalledWith('c1', 'g1', 0)
+
+    store.setChannelPinned('c1', 'g1', false)
+    expect(mockDb.unpinChannel).toHaveBeenCalledWith('c1')
   })
 })

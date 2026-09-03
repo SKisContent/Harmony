@@ -57,6 +57,10 @@ export interface ChannelRow {
   mentionCount: number
   /** muted via Discord's per-guild / per-channel settings. */
   muted: boolean
+  /** Harmony-local pin — floats to the top of its category (FR-3-style). */
+  pinned: boolean
+  /** order among pinned channels in the same category; 0 when not pinned. */
+  pinSortKey: number
   /** active threads we're a member of (from the gateway READY payload). */
   threads: ThreadRow[]
 }
@@ -109,6 +113,19 @@ export interface PinnedThreadView {
   missing: boolean
 }
 
+export interface PinnedChannelView {
+  id: string
+  name: string
+  guildId: string
+  guildName: string
+  categoryName: string
+  unread: boolean
+  mentionCount: number
+  muted: boolean
+  sortKey: number
+  missing: boolean
+}
+
 export interface GuildGroup {
   id: string
   name: string
@@ -156,8 +173,9 @@ export interface UnifiedState {
     hideEmptyCategories: boolean
     /** definition of "empty" for FR-6. */
     emptyMode: 'no-visible' | 'no-unread'
-    /** every pinned thread, across all guilds, for the global Pinned view. */
+    /** every pinned thread and channel, across all guilds, for the Pinned view. */
     pinnedThreads: PinnedThreadView[]
+    pinnedChannels: PinnedChannelView[]
   }
 }
 
@@ -278,6 +296,8 @@ export interface HarmonyApi {
     patch: { note?: string | null; label?: string | null }
   ): Promise<void>
   reorderPinnedThreads(ids: string[]): Promise<void>
+  pinChannel(channelId: string, guildId: string, pinned: boolean): Promise<void>
+  reorderPinnedChannels(ids: string[]): Promise<void>
   setCategoryLayout(
     categoryId: string,
     guildId: string,

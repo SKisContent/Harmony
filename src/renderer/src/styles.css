@@ -783,9 +783,14 @@ button:disabled {
 }
 
 .thread:hover .pin-btn,
+.chan:hover .pin-btn,
 .ts-item:hover .pin-btn,
 .pin-btn.on {
   opacity: 0.75;
+}
+
+.chan.is-pinned .name {
+  font-weight: 600;
 }
 
 .pin-btn.on {
