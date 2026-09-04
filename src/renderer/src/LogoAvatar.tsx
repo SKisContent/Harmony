@@ -1,3 +1,5 @@
+import type { ReactElement } from 'react'
+
 // Fallback avatar: the Harmony wavy-H mark on a per-user background colour.
 // Shown wherever a user or conversation has no image of their own; the colour is
 // derived from a stable seed (a user or channel id) so the same person always
@@ -25,7 +27,7 @@ export function LogoAvatar({
 }: {
   seed: string
   className?: string
-}): JSX.Element {
+}): ReactElement {
   return (
     <svg className={className} viewBox="0 0 1024 1024" role="img" aria-hidden="true">
       <rect width="1024" height="1024" fill={avatarColor(seed)} />

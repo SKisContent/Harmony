@@ -3,7 +3,7 @@
 // blockquotes, headings, spoilers, links, and <@id> / <#id> / <:emoji:> /
 // <t:unix> tokens. Not a spec-complete markdown implementation.
 
-import { type ReactNode, useState } from 'react'
+import { type ReactElement, type ReactNode, useState } from 'react'
 
 export interface MdContext {
   /** user id -> display name, for <@id> */
@@ -12,7 +12,7 @@ export interface MdContext {
   channels: Map<string, string>
 }
 
-function Spoiler({ children }: { children: ReactNode }): JSX.Element {
+function Spoiler({ children }: { children: ReactNode }): ReactElement {
   const [shown, setShown] = useState(false)
   return (
     <span

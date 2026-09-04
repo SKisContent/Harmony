@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { type ReactElement, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { MessageRow, ThreadSummary, UploadedAttachment } from '@shared/types'
 import type { Selection } from './App'
 import { type MdContext, renderContent } from './markdown'
@@ -69,7 +69,7 @@ export function MessagePane({
   pinnedThreadIds: Set<string>
   selfId: string
   onOpen: (sel: Selection) => void
-}): JSX.Element {
+}): ReactElement {
   const [messages, setMessages] = useState<MessageRow[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -401,7 +401,7 @@ export function MessagePane({
           ? `${typerNames[0]} and ${typerNames[1]} are typing…`
           : 'Several people are typing…'
 
-  const renderThreadRow = (t: ThreadSummary): JSX.Element => {
+  const renderThreadRow = (t: ThreadSummary): ReactElement => {
     const pinned = pinnedThreadIds.has(t.id)
     return (
       <div
