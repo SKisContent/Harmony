@@ -1,7 +1,26 @@
 import { EventEmitter } from 'node:events'
 import { join } from 'node:path'
 import { app } from 'electron'
-import { readSecure, writeSecure } from './secure-file'
+import { readSecure } from './secure-file'
+import {
+  type LocalState,
+  clearModel,
+  loadLocalState,
+  loadModel,
+  pinChannel,
+  pinThread,
+  reorderPinnedCategories,
+  reorderPinnedChannels,
+  reorderPinnedThreads,
+  saveModel,
+  setCategoryLayout,
+  setPref,
+  type StoreModel,
+  unpinChannel,
+  unpinThread,
+  updateThreadPin
+} from './db'
+import { toRow } from './rest'
 import {
   type CategoryGroup,
   type ChannelRow,
@@ -9,6 +28,8 @@ import {
   type DmMemberRow,
   type DmRow,
   type GuildGroup,
+  type PinnedChannelView,
+  type PinnedThreadView,
   type PresenceStatus,
   type ThreadRow,
   type UnifiedState,
@@ -83,7 +104,7 @@ interface GuildSettings {
   channel_overrides?: { channel_id: string; muted?: boolean }[]
 }
 
-const snapshotPath = () => join(app.getPath('userData'), 'snapshot.bin')
+const snapshotFilePath = () => join(app.getPath('userData'), 'snapshot.bin')
 
 /** Owns the in-memory model and derives the UnifiedState the renderer renders. */
 export class Store extends EventEmitter {
@@ -100,10 +121,76 @@ export class Store extends EventEmitter {
   private mutedGuilds = new Set<string>()
   private mutedChannels = new Set<string>()
   private syncedAt: number | null = null
+  private local: LocalState = { prefs: {}, pinnedThreads: [], pinnedChannels: [], categoryLayout: {} }
 
   constructor() {
     super()
-    this.loadSnapshot()
+    this.loadFromDb()
+    this.reloadLocal()
+  }
+
+  private reloadLocal(): void {
+    try {
+      this.local = loadLocalState()
+    } catch (e) {
+      console.error('[store] local state load failed:', (e as Error).message)
+    }
+  }
+
+  // --- Harmony-local layout mutations (FR-3 / FR-6 / FR-7) ---------------
+
+  setPref(key: string, value: string): void {
+    setPref(key, value)
+    this.reloadLocal()
+    this.emit('change')
+  }
+
+  setThreadPinned(threadId: string, pinned: boolean): void {
+    if (pinned) pinThread(threadId, this.local.pinnedThreads.length)
+    else unpinThread(threadId)
+    this.reloadLocal()
+    this.emit('change')
+  }
+
+  setThreadPinMeta(threadId: string, patch: { note?: string | null; label?: string | null }): void {
+    updateThreadPin(threadId, patch)
+    this.reloadLocal()
+    this.emit('change')
+  }
+
+  reorderPinnedThreads(ids: string[]): void {
+    reorderPinnedThreads(ids)
+    this.reloadLocal()
+    this.emit('change')
+  }
+
+  setChannelPinned(channelId: string, guildId: string, pinned: boolean): void {
+    if (pinned) pinChannel(channelId, guildId, this.local.pinnedChannels.length)
+    else unpinChannel(channelId)
+    this.reloadLocal()
+    this.emit('change')
+  }
+
+  reorderPinnedChannels(ids: string[]): void {
+    reorderPinnedChannels(ids)
+    this.reloadLocal()
+    this.emit('change')
+  }
+
+  setCategoryLayout(
+    categoryId: string,
+    guildId: string,
+    patch: { pinned?: boolean; collapsed?: boolean; force?: 'show' | 'hide' | null }
+  ): void {
+    setCategoryLayout(categoryId, guildId, patch)
+    this.reloadLocal()
+    this.emit('change')
+  }
+
+  reorderPinnedCategories(ids: string[]): void {
+    reorderPinnedCategories(ids)
+    this.reloadLocal()
+    this.emit('change')
   }
 
   setStatus(status: ConnectionStatus, detail?: string): void {
@@ -157,7 +244,7 @@ export class Store extends EventEmitter {
         this.syncedAt = Date.now()
         this.status = 'ready'
         this.detail = undefined
-        this.saveSnapshot()
+        this.persist()
         this.emit('change')
         break
       }
@@ -268,7 +355,51 @@ export class Store extends EventEmitter {
           rsEntry.mention_count = (rsEntry.mention_count ?? 0) + 1
           this.readStates.set(d.channel_id, rsEntry)
         }
+        this.emit('message', { kind: 'create', channelId: d.channel_id, message: toRow(d) })
         this.emit('change')
+        break
+      }
+
+      case 'MESSAGE_UPDATE': {
+        if (d.id && d.channel_id) {
+          this.emit('message', { kind: 'update', channelId: d.channel_id, message: toRow(d) })
+        }
+        break
+      }
+      case 'MESSAGE_DELETE': {
+        if (d.id && d.channel_id) {
+          this.emit('message', { kind: 'delete', channelId: d.channel_id, id: d.id })
+        }
+        break
+      }
+
+      case 'MESSAGE_REACTION_ADD':
+      case 'MESSAGE_REACTION_REMOVE': {
+        if (!d.message_id || !d.channel_id || !d.emoji) break
+        const e = d.emoji as { name: string | null; id: string | null; animated?: boolean }
+        this.emit('message', {
+          kind: 'reaction',
+          channelId: d.channel_id,
+          messageId: d.message_id,
+          emoji: {
+            key: e.id ? `${e.name ?? '_'}:${e.id}` : (e.name ?? ''),
+            name: e.name ?? '',
+            id: e.id,
+            animated: !!e.animated
+          },
+          delta: type === 'MESSAGE_REACTION_ADD' ? 1 : -1,
+          me: d.user_id === this.self?.id
+        })
+        break
+      }
+
+      case 'TYPING_START': {
+        if (!d.channel_id || !d.user_id) break
+        this.emit('typing', {
+          channelId: d.channel_id,
+          userId: d.user_id,
+          userName: this.userName(d.user_id)
+        })
         break
       }
 
@@ -280,7 +411,39 @@ export class Store extends EventEmitter {
         this.emit('change')
         break
       }
+
+      case 'USER_GUILD_SETTINGS_UPDATE': {
+        const gid: string | null = d.guild_id ?? null
+        if (gid) {
+          if (d.muted) this.mutedGuilds.add(gid)
+          else this.mutedGuilds.delete(gid)
+        }
+        for (const o of d.channel_overrides ?? []) {
+          if (o.muted) this.mutedChannels.add(o.channel_id)
+          else this.mutedChannels.delete(o.channel_id)
+        }
+        this.persist()
+        this.emit('change')
+        break
+      }
     }
+  }
+
+  /** Optimistic read-state bump so the sidebar clears before the gateway echoes. */
+  markReadLocal(channelId: string, messageId: string): void {
+    const e: ReadStateEntry = this.readStates.get(channelId) ?? { id: channelId }
+    e.last_message_id = messageId
+    e.mention_count = 0
+    this.readStates.set(channelId, e)
+    this.emit('change')
+  }
+
+  /** Optimistic mute toggle. */
+  setMutedLocal(id: string, kind: 'guild' | 'channel', muted: boolean): void {
+    const set = kind === 'guild' ? this.mutedGuilds : this.mutedChannels
+    if (muted) set.add(id)
+    else set.delete(id)
+    this.emit('change')
   }
 
   private upsertGuild(g: RawGuild): void {
@@ -299,6 +462,13 @@ export class Store extends EventEmitter {
     let mentionTotal = 0
     let channelTotal = 0
 
+    const pinnedThreadIds = new Set(this.local.pinnedThreads.map((p) => p.threadId))
+    const pinnedChannelMap = new Map(this.local.pinnedChannels.map((p) => [p.channelId, p]))
+    const { categoryLayout } = this.local
+    const hideEmptyCategories = this.local.prefs.hideEmptyCategories !== '0'
+    const emptyMode: UnifiedState['local']['emptyMode'] =
+      this.local.prefs.emptyMode === 'no-unread' ? 'no-unread' : 'no-visible'
+
     // active threads grouped by their parent channel id
     const threadsByParent = new Map<string, ThreadRow[]>()
     for (const t of this.threads.values()) {
@@ -314,13 +484,19 @@ export class Store extends EventEmitter {
         archived: !!t.thread_metadata?.archived,
         messageCount: t.message_count ?? 0,
         unread,
-        mentionCount: rs?.mention_count ?? 0
+        mentionCount: rs?.mention_count ?? 0,
+        pinned: pinnedThreadIds.has(t.id)
       }
       const list = threadsByParent.get(t.parent_id) ?? threadsByParent.set(t.parent_id, []).get(t.parent_id)!
       list.push(row)
     }
     for (const list of threadsByParent.values()) {
-      list.sort((a, b) => Number(b.unread) - Number(a.unread) || a.name.localeCompare(b.name))
+      list.sort(
+        (a, b) =>
+          Number(b.pinned) - Number(a.pinned) ||
+          Number(b.unread) - Number(a.unread) ||
+          a.name.localeCompare(b.name)
+      )
     }
 
     for (const g of this.guilds.values()) {
@@ -346,6 +522,7 @@ export class Store extends EventEmitter {
         const mentionCount = rs?.mention_count ?? 0
         if (unread) unreadTotal++
         mentionTotal += mentionCount
+        const pin = pinnedChannelMap.get(c.id)
         const row: ChannelRow = {
           id: c.id,
           guildId: g.id,
@@ -356,6 +533,8 @@ export class Store extends EventEmitter {
           unread,
           mentionCount,
           muted: this.mutedGuilds.has(g.id) || this.mutedChannels.has(c.id),
+          pinned: !!pin,
+          pinSortKey: pin?.sortKey ?? 0,
           threads: threadsByParent.get(c.id) ?? []
         }
         const key = c.parent_id && categoryNames.has(c.parent_id) ? c.parent_id : ''
@@ -364,18 +543,65 @@ export class Store extends EventEmitter {
 
       const categories: CategoryGroup[] = []
       for (const [key, rows] of buckets) {
-        rows.sort((a, b) => a.position - b.position || a.name.localeCompare(b.name))
+        rows.sort(
+          (a, b) =>
+            Number(b.pinned) - Number(a.pinned) ||
+            a.pinSortKey - b.pinSortKey ||
+            a.position - b.position ||
+            a.name.localeCompare(b.name)
+        )
         const recentActivity = rows.reduce((max, r) => {
           const raw = this.guilds.get(g.id)?.channels?.find((c) => c.id === r.id)?.last_message_id
           return raw && BigInt(raw) > BigInt(max) ? raw : max
         }, '0')
         const meta = key ? categoryNames.get(key) : undefined
+        const layout = key ? categoryLayout[key] : undefined
+        const pinned = !!layout?.pinned
+
+        // FR-6: hide a real category with nothing worth showing, unless pinned
+        // or force-shown; force-hide always wins.
+        const empty =
+          emptyMode === 'no-unread'
+            ? !rows.some((r) => r.unread || r.mentionCount > 0)
+            : rows.length === 0
+        let hidden = false
+        if (layout?.force === 'hide') hidden = true
+        else if (layout?.force === 'show' || pinned) hidden = false
+        else if (hideEmptyCategories && key && empty) hidden = true
+
         categories.push({
           id: key || null,
           name: meta?.name ?? null,
           position: meta?.position ?? -1,
           recentActivity,
-          channels: rows
+          channels: rows,
+          pinned,
+          pinSortKey: layout?.sortKey ?? 0,
+          collapsed: !!layout?.collapsed,
+          hidden
+        })
+      }
+
+      // FR-6: categories with no viewable channels at all. Kept in the model
+      // (flagged hidden) so the "N hidden categories" affordance can reveal them.
+      for (const [catId, cmeta] of categoryNames) {
+        if (buckets.has(catId)) continue
+        const layout = categoryLayout[catId]
+        const pinned = !!layout?.pinned
+        let hidden = false
+        if (layout?.force === 'hide') hidden = true
+        else if (layout?.force === 'show' || pinned) hidden = false
+        else if (hideEmptyCategories) hidden = true
+        categories.push({
+          id: catId,
+          name: cmeta.name,
+          position: cmeta.position,
+          recentActivity: '0',
+          channels: [],
+          pinned,
+          pinSortKey: layout?.sortKey ?? 0,
+          collapsed: !!layout?.collapsed,
+          hidden
         })
       }
 
@@ -384,6 +610,7 @@ export class Store extends EventEmitter {
         name,
         iconUrl: icon ? `https://cdn.discordapp.com/icons/${g.id}/${icon}.png?size=64` : null,
         position: 0,
+        muted: this.mutedGuilds.has(g.id),
         categories
       })
     }
@@ -404,8 +631,109 @@ export class Store extends EventEmitter {
         channels: channelTotal,
         unread: unreadTotal,
         mentions: mentionTotal
+      },
+      local: {
+        hideEmptyCategories,
+        emptyMode,
+        pinnedThreads: this.buildPinnedThreads(),
+        pinnedChannels: this.buildPinnedChannels()
       }
     }
+  }
+
+  /** Resolve every pinned channel for the global "Pinned" view (Q14). */
+  private buildPinnedChannels(): PinnedChannelView[] {
+    return this.local.pinnedChannels.map((p) => {
+      const g = this.guilds.get(p.guildId)
+      const ch = g?.channels?.find((c) => c.id === p.channelId)
+      const guildName = g?.properties?.name ?? g?.name ?? ''
+      if (!g || !ch) {
+        return {
+          id: p.channelId,
+          name: 'Removed channel',
+          guildId: p.guildId,
+          guildName,
+          categoryName: '',
+          unread: false,
+          mentionCount: 0,
+          muted: false,
+          sortKey: p.sortKey,
+          missing: true
+        }
+      }
+      const rs = this.readStates.get(ch.id)
+      const unread =
+        !!ch.last_message_id &&
+        (!rs?.last_message_id || BigInt(ch.last_message_id) > BigInt(rs.last_message_id))
+      const cat = ch.parent_id ? g.channels?.find((c) => c.id === ch.parent_id) : undefined
+      return {
+        id: ch.id,
+        name: ch.name ?? 'channel',
+        guildId: g.id,
+        guildName,
+        categoryName: cat?.name ?? '',
+        unread,
+        mentionCount: rs?.mention_count ?? 0,
+        muted: this.mutedGuilds.has(g.id) || this.mutedChannels.has(ch.id),
+        sortKey: p.sortKey,
+        missing: false
+      }
+    })
+  }
+
+  /** Resolve every pinned thread id for the global "Pinned" view (FR-3 / Q14). */
+  private buildPinnedThreads(): PinnedThreadView[] {
+    const guildName = (id: string | undefined): string => {
+      if (!id) return ''
+      const g = this.guilds.get(id)
+      return g?.properties?.name ?? g?.name ?? 'Unknown server'
+    }
+    const channelName = (guildId: string | undefined, channelId: string | undefined): string => {
+      if (!guildId || !channelId) return ''
+      return this.guilds.get(guildId)?.channels?.find((c) => c.id === channelId)?.name ?? ''
+    }
+
+    return this.local.pinnedThreads.map((p) => {
+      const t = this.threads.get(p.threadId)
+      if (!t) {
+        return {
+          id: p.threadId,
+          name: p.label || 'Removed thread',
+          guildId: '',
+          guildName: '',
+          parentId: '',
+          parentName: '',
+          archived: false,
+          unread: false,
+          mentionCount: 0,
+          messageCount: 0,
+          note: p.note,
+          label: p.label,
+          sortKey: p.sortKey,
+          missing: true
+        }
+      }
+      const rs = this.readStates.get(t.id)
+      const unread =
+        !!t.last_message_id &&
+        (!rs?.last_message_id || BigInt(t.last_message_id) > BigInt(rs.last_message_id))
+      return {
+        id: t.id,
+        name: t.name ?? 'thread',
+        guildId: t.guild_id ?? '',
+        guildName: guildName(t.guild_id),
+        parentId: t.parent_id ?? '',
+        parentName: channelName(t.guild_id, t.parent_id),
+        archived: !!t.thread_metadata?.archived,
+        unread,
+        mentionCount: rs?.mention_count ?? 0,
+        messageCount: t.message_count ?? 0,
+        note: p.note,
+        label: p.label,
+        sortKey: p.sortKey,
+        missing: false
+      }
+    })
   }
 
   private userName(id: string): string {
@@ -520,51 +848,92 @@ export class Store extends EventEmitter {
     this.self = null
     this.syncedAt = null
     this.status = 'no-token'
+    try {
+      clearModel()
+    } catch (e) {
+      console.error('[store] clear failed:', (e as Error).message)
+    }
     this.emit('change')
   }
 
-  // --- snapshot persistence (JSON via secure-file; SQLite replaces this next) ---
+  // --- local mirror (SQLite via db.ts) ------------------------------------
 
-  private saveSnapshot(): void {
-    try {
-      const json = JSON.stringify({
-        self: this.self,
-        guilds: [...this.guilds.values()],
-        threads: [...this.threads.values()],
-        dmChannels: [...this.dmChannels.values()],
-        users: [...this.users.values()],
-        presences: [...this.presences.entries()],
-        readStates: [...this.readStates.values()],
-        mutedGuilds: [...this.mutedGuilds],
-        mutedChannels: [...this.mutedChannels],
-        syncedAt: this.syncedAt
-      })
-      writeSecure(snapshotPath(), json)
-    } catch {
-      /* best effort */
+  private toModel(): StoreModel {
+    const rows = (v: Iterable<unknown>): Record<string, unknown>[] =>
+      [...v] as Record<string, unknown>[]
+    return {
+      self: this.self,
+      syncedAt: this.syncedAt,
+      guilds: rows(this.guilds.values()),
+      threads: rows(this.threads.values()),
+      dmChannels: rows(this.dmChannels.values()),
+      users: rows(this.users.values()),
+      presences: [...this.presences.entries()],
+      readStates: rows(this.readStates.values()),
+      mutedGuilds: [...this.mutedGuilds],
+      mutedChannels: [...this.mutedChannels]
     }
   }
 
-  private loadSnapshot(): void {
-    const json = readSecure(snapshotPath())
-    if (!json) return
+  private applyModel(s: StoreModel): void {
+    this.self = (s.self as UnifiedState['self']) ?? null
+    for (const g of s.guilds) this.guilds.set(String(g.id), g as unknown as RawGuild)
+    for (const t of s.threads) this.threads.set(String(t.id), t as unknown as RawThread)
+    for (const c of s.dmChannels) this.dmChannels.set(String(c.id), c as unknown as RawDm)
+    for (const u of s.users) this.users.set(String(u.id), u as unknown as RawUser)
+    for (const [id, st] of s.presences) this.presences.set(id, asStatus(st))
+    for (const e of s.readStates) this.readStates.set(String(e.id), e as unknown as ReadStateEntry)
+    this.rebuildDmUserIds()
+    this.mutedGuilds = new Set(s.mutedGuilds)
+    this.mutedChannels = new Set(s.mutedChannels)
+    this.syncedAt = s.syncedAt
+  }
+
+  private persist(): void {
+    try {
+      saveModel(this.toModel())
+    } catch (e) {
+      console.error('[store] persist failed:', (e as Error).message)
+    }
+  }
+
+  private loadFromDb(): void {
+    try {
+      let model = loadModel()
+      if (!model) model = this.loadSnapshotFile()
+      if (!model) return
+      this.applyModel(model)
+      console.log('[store] loaded from db:', this.guilds.size, 'guilds')
+      if (this.guilds.size > 0) this.status = 'ready'
+    } catch (e) {
+      console.error('[store] load failed:', (e as Error).message)
+    }
+  }
+
+  /** Read a `snapshot.bin` JSON file into the database when the DB is empty. */
+  private loadSnapshotFile(): StoreModel | null {
+    const json = readSecure(snapshotFilePath())
+    if (!json) return null
     try {
       const s = JSON.parse(json)
-      this.self = s.self ?? null
-      for (const g of s.guilds ?? []) this.guilds.set(g.id, g)
-      for (const t of s.threads ?? []) this.threads.set(t.id, t)
-      for (const c of s.dmChannels ?? []) this.dmChannels.set(c.id, c)
-      for (const u of s.users ?? []) this.users.set(u.id, u)
-      for (const [id, st] of s.presences ?? []) this.presences.set(id, asStatus(st))
-      for (const e of s.readStates ?? []) this.readStates.set(e.id, e)
-      this.rebuildDmUserIds()
-      this.mutedGuilds = new Set(s.mutedGuilds ?? [])
-      this.mutedChannels = new Set(s.mutedChannels ?? [])
-      this.syncedAt = s.syncedAt ?? null
-      console.log('[store] snapshot loaded:', this.guilds.size, 'guilds')
-      if (this.guilds.size > 0) this.status = 'ready'
+      const model: StoreModel = {
+        self: s.self ?? null,
+        syncedAt: s.syncedAt ?? null,
+        guilds: s.guilds ?? [],
+        threads: s.threads ?? [],
+        dmChannels: s.dmChannels ?? [],
+        users: s.users ?? [],
+        presences: s.presences ?? [],
+        readStates: s.readStates ?? [],
+        mutedGuilds: s.mutedGuilds ?? [],
+        mutedChannels: s.mutedChannels ?? []
+      }
+      saveModel(model)
+      console.log('[store] loaded snapshot.bin')
+      return model
     } catch {
-      console.error('[store] snapshot parse failed')
+      console.error('[store] snapshot.bin parse failed')
+      return null
     }
   }
 }

@@ -2,9 +2,8 @@ import { BrowserWindow, app } from 'electron'
 import { join } from 'node:path'
 import { readSecure, removeSecure, writeSecure } from './secure-file'
 
-// The account token is stored via secure-file (safeStorage/Keychain when
-// available, tagged plaintext otherwise). A dedicated per-account OS-keychain
-// entry comes later; see docs/requirements.md XR-7.
+// The account token is stored via secure-file. See docs/requirements.md XR-7
+// for the account model.
 const tokenPath = () => join(app.getPath('userData'), 'token.bin')
 
 export function loadToken(): string | null {

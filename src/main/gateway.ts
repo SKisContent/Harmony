@@ -3,8 +3,9 @@ import WebSocket from 'ws'
 
 const DEFAULT_GATEWAY = 'wss://gateway.discord.gg/?v=9&encoding=json'
 
-// Mirror the real web client's IDENTIFY properties (docs/requirements.md §11.1 /
-// NFR-5). client_build_number should be scraped live in a later iteration.
+// The real web client's IDENTIFY properties (docs/requirements.md §11.1 / NFR-5).
+// client_build_number is a fixed value here; the real client reads it from the
+// current web bundle.
 const CLIENT_PROPERTIES = {
   os: 'Mac OS X',
   browser: 'Chrome',

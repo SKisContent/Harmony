@@ -4,14 +4,12 @@
 
 Harmony is a desktop client for Discord that inverts the official app's defaults.
 Instead of one server at a time, a handful of "recent" threads, and per-server
-search, Harmony aims to show *everything you have access to* in one place and make
+search, Harmony shows *everything you have access to* in one place and treats
 retrieval — "where was I mentioned?", "what did I post?", "every thread in this
-channel" — a first-class feature.
+channel" — as a first-class feature.
 
-> **Status: early / pre-alpha.** A working vertical slice exists (sign-in,
-> unified channel list, message reading + posting + replies, threads, DMs with
-> presence). Large parts of the vision are not built yet. See
-> [Roadmap](#roadmap). macOS is the only platform exercised so far.
+> **Status: pre-alpha.** [Features](#features) lists what works and what does
+> not. macOS is the only tested platform.
 
 ---
 
@@ -22,10 +20,10 @@ channel" — a first-class feature.
 - [Screenshots](#screenshots)
 - [Architecture](#architecture)
 - [Getting started](#getting-started)
+- [Build & install locally](#build--install-locally)
 - [Usage](#usage)
 - [Project structure](#project-structure)
 - [Development](#development)
-- [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [Disclaimer](#disclaimer)
 - [License](#license)
@@ -55,28 +53,42 @@ The full product spec lives in [`docs/requirements.md`](docs/requirements.md).
 
 ## Features
 
-**Working today**
+**Works**
 
-- **Sign in once** via Discord's real login page (QR code recommended); session is
+- **Sign in** via Discord's real login page (QR code recommended). The session is
   stored encrypted and restored on launch.
 - **Unified channel list** — every text channel across every server in one tree,
   or scoped to a single server. Group DMs show their members inline.
-- **Category controls** — sort categories alphabetically or by most-recent
-  message; filter to unread only; hide muted channels.
-- **Threads** — joined threads in the sidebar, plus a per-channel panel listing
-  *all* threads (active **and** archived), not just the recent few.
+- **Category controls** — sort alphabetically or by most-recent message; filter
+  to unread only; hide muted channels.
+- **Pin threads** — from the sidebar or the per-channel panel; pinned threads
+  sort first. A **Pinned** mode lists every pinned thread across all servers with
+  a server › channel breadcrumb, reorder, and unpin.
+- **Pin, reorder, and collapse categories** — pinned categories float to the top
+  of a server; collapse state persists.
+- **Hide empty categories** — categories with no viewable channels (or, opt-in,
+  no unread) are hidden, with a per-server toggle to reveal them.
+- **Threads panel** — every thread in a channel, active **and** archived.
 - **Direct messages** — a dedicated mode with 1:1 and group DMs, live presence
   dots (online / idle / DND / offline), and group-member sublists.
-- **Read, post, and reply** — message history, a composer, and proper
-  reply-to-a-message with an optional ping toggle. Works in channels, threads,
-  and DMs.
-- **Offline-friendly** — an encrypted local snapshot paints the UI instantly on
-  launch, before the gateway reconnects.
+- **Read, post, and reply** — message history with scroll-back, live
+  create/edit/delete in the open channel, a composer, and reply-to-a-message with
+  an optional ping toggle. Works in channels, threads, and DMs.
+- **Markdown rendering** — bold/italic/code/quotes/spoilers, resolved
+  `@mentions` / `#channels`, custom emoji, `<t:…>` timestamps.
+- **Local SQLite store** — mirrors gateway state so the UI paints on launch
+  before the gateway connects. Includes an FTS5 table (not yet populated).
 
-**Planned** (not yet implemented): pin threads and categories, hide empty
-categories, a cross-server **Mentions inbox** and **My Messages** view with
-search-within, message **bookmarks**, Markdown/mention rendering, live updates in
-the open channel, scroll-back, SQLite + full-text index. See [Roadmap](#roadmap).
+**Not built**
+
+- Cross-server **Mentions inbox** and **My Messages** views with search-within.
+- Message **bookmarks**.
+- Global search UI / query language over the local index.
+- Attachments, emoji/sticker picker, `@`/`#`/`:` autocomplete, reactions,
+  edit/delete, typing indicator, mark-as-read, mute from Harmony.
+- Command palette and full keyboard navigation.
+- Desktop notifications.
+- Notarised builds; auto-update; Windows/Linux testing.
 
 Out of scope: voice, video, stage channels, and server administration.
 
@@ -84,7 +96,7 @@ Out of scope: voice, video, stage channels, and server administration.
 
 ## Screenshots
 
-_TODO: add screenshots once the UI stabilises._
+_None yet._
 
 ---
 
@@ -93,8 +105,8 @@ _TODO: add screenshots once the UI stabilises._
 - **Electron + React + TypeScript**, built with `electron-vite`.
 - The **main process** runs the sync engine: a WebSocket gateway client, a
   rate-limit-aware REST client, and an in-memory store that ingests gateway events
-  and derives the view model. It persists an encrypted JSON snapshot (SQLite is
-  planned).
+  and derives the view model. It mirrors state to a local SQLite database
+  (`better-sqlite3`), with a full-text index for retrieval.
 - The **renderer** is a React app. It never talks to Discord directly —
   everything goes through a small typed IPC surface (`window.harmony`).
 - **Auth**: Harmony authenticates as your own Discord account. It embeds Discord's
@@ -119,10 +131,8 @@ reverse-engineering notes) and [`docs/requirements.md`](docs/requirements.md)
 
 ### Prerequisites
 
-- **Node.js** 20+ (developed against a much newer version; Electron bundles its
-  own Node 20).
-- **macOS** — the only platform tested so far. Windows/Linux are not yet
-  supported.
+- **Node.js** 20+ (Electron bundles its own Node 20).
+- **macOS** — the only tested platform.
 - A **Discord account**.
 
 ### Install
@@ -133,7 +143,7 @@ cd harmony
 npm install
 ```
 
-Two install quirks you may hit on a fresh machine (npm 11):
+Three install quirks you may hit on a fresh machine (npm 11):
 
 1. **Install scripts are gated.** `package.json` approves the ones needed via an
    `allowScripts` block. If Electron/esbuild postinstall didn't run:
@@ -153,6 +163,13 @@ Two install quirks you may hit on a fresh machine (npm 11):
    printf 'Electron.app/Contents/MacOS/Electron' > node_modules/electron/path.txt
    ```
 
+3. **The `better-sqlite3` native module** is rebuilt against Electron's ABI by a
+   `postinstall` step. If that was skipped or fails, run it yourself:
+
+   ```bash
+   npm run rebuild
+   ```
+
 ### Run
 
 ```bash
@@ -162,6 +179,51 @@ npm run dev
 Electron launches with a sign-in screen. Use the **QR code** in the pop-up window
 (scan it with the Discord mobile app) — no password or CAPTCHA needed. Your
 session is then remembered between launches.
+
+`npm run dev` is the development loop (renderer hot-reload; restart it after
+editing `src/main/**`). To run the app the way an end user would, build and
+install it — see below.
+
+---
+
+## Build & install locally
+
+To produce an installable macOS app bundle:
+
+```bash
+npm run dist:local
+```
+
+This writes **`dist/mac-arm64/Harmony.app`** — a real, code-signed[^sign] app —
+reusing the Electron runtime already in `node_modules/`, so it needs no network.
+The first run takes a couple of minutes (it rebuilds the `better-sqlite3` native
+module for the target and signs the ~250 MB bundle); later runs are quicker.
+`dist:local` targets **Apple Silicon**.
+
+| Command | Output |
+|---|---|
+| `npm run dist:local` | `dist/mac-arm64/Harmony.app` — arm64, unpacked, fully offline. |
+| `npm run dist` | Full set: `.dmg` + `.zip` (macOS arm64/x64), NSIS installer + `.zip` (Windows), `.AppImage` + `.deb` (Linux). Downloads the Electron runtime per target on first run, then caches it. |
+| push a `vX.Y.Z` tag | CI ([`.github/workflows/build.yml`](.github/workflows/build.yml)) builds all three platforms and opens a draft GitHub Release with the installers attached. |
+
+### Install (macOS)
+
+```bash
+cp -R dist/mac-arm64/Harmony.app /Applications/
+```
+
+The build is **not notarised**, so Gatekeeper blocks the first launch. Either
+right-click the app in Finder → **Open** → **Open**, or clear the quarantine
+flag:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Harmony.app
+```
+
+It launches normally after that. Sign in with the QR code as in [Run](#run).
+
+[^sign]: Signed with whatever code-signing identity is in your keychain, or
+ad-hoc if there is none — not an Apple-notarised Developer ID build.
 
 ---
 
@@ -191,7 +253,9 @@ harmony/
 │   ├── main/             Electron main: auth, gateway, REST, store, IPC
 │   ├── preload/          contextBridge -> window.harmony
 │   └── renderer/         React app (App, MessagePane, styles)
-├── electron.vite.config.ts
+├── electron.vite.config.ts  Bundling (main / preload / renderer)
+├── electron-builder.yml     App packaging (dmg / zip / nsis / AppImage / deb)
+├── vitest.config.ts
 ├── tsconfig.json
 └── package.json
 ```
@@ -202,54 +266,35 @@ harmony/
 
 | Command | What it does |
 |---|---|
-| `npm run dev` | Build main/preload, start the renderer dev server, launch Electron. |
-| `npm run typecheck` | `tsc --noEmit` over the whole project. |
-| `npm run build` | `electron-vite build` (packaging is not yet configured). |
+| `npm run dev` | Build main/preload, start the renderer dev server, launch Electron (renderer hot-reloads). |
+| `npm run typecheck` | `tsc --noEmit` over the whole project, tests included. |
+| `npm test` | Vitest unit + component suite (`npm run test:watch` to watch). |
+| `npm run build` | `electron-vite build` → `out/` (bundles only, no app packaging). |
+| `npm run dist:local` / `npm run dist` | Package an app bundle — see [Build & install locally](#build--install-locally). |
 
 Notes:
 
 - Editing files under `src/main/**` requires stopping and re-running `npm run dev`;
   the renderer hot-reloads on its own.
-- There is no test suite yet.
-- Local data (encrypted token + snapshot) lives in
+- Local data — the encrypted token, a dev encryption key (`dev-secret.key`), and
+  the SQLite database (`harmony.db`) — lives in
   `~/Library/Application Support/harmony/`. Delete it to start clean.
-
----
-
-## Roadmap
-
-Roughly in priority order:
-
-- [ ] Live message updates in the open channel; scroll-back / history paging
-- [ ] Markdown rendering; resolve `@mentions`, `#channels`, custom emoji
-- [ ] Pin threads, pin/reorder categories, hide empty categories
-- [ ] **Mentions inbox** — every message that tags you, across servers, searchable
-- [ ] **My Messages** — one-click list of everything you've posted, searchable
-- [ ] **Bookmarks** — save any message to a private, searchable list
-- [ ] Attachments, emoji/sticker picker, reactions, edit/delete, typing indicator
-- [ ] SQLite + full-text search index (replacing the JSON snapshot)
-- [ ] Windows / Linux builds; packaging, signing, auto-update
-- [ ] Tests
-
-The authoritative, detailed version is in
-[`docs/requirements.md`](docs/requirements.md).
 
 ---
 
 ## Contributing
 
-Contributions are welcome. This is an early project, so the most useful things
-right now are: trying it, filing issues with clear reproduction steps, and small
-focused pull requests.
+The full spec is in [`docs/requirements.md`](docs/requirements.md); the
+[Features](#features) list tracks what is and isn't built.
 
 - Discuss anything non-trivial in an issue first.
-- Keep PRs scoped to one change; run `npm run typecheck` before opening one.
+- Keep PRs scoped to one change. Run `npm run typecheck` and `npm test` before
+  opening one.
 - Match the surrounding code style.
 - By contributing you agree your work is licensed under the project's license
   (see below).
 
-_A `CONTRIBUTING.md` and issue/PR templates will be added as the project
-formalises._
+There is no `CONTRIBUTING.md` or issue/PR template.
 
 ---
 
@@ -272,8 +317,7 @@ No warranty of any kind. You are responsible for how you use it.
 
 ## License
 
-Not yet chosen. Until a `LICENSE` file is added, no permissions are granted beyond
-viewing the source. A permissive open-source license is intended.
+GNU General Public License v3.0. See [`LICENSE`](LICENSE).
 
 ---
 
