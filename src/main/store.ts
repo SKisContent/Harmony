@@ -4,7 +4,12 @@ import { app } from 'electron'
 import { readSecure } from './secure-file'
 import {
   type LocalState,
+  type SearchHit,
+  type SearchOpts,
   clearModel,
+  deleteIndexedMessage,
+  indexMessage,
+  indexedMessageCount,
   loadLocalState,
   loadModel,
   pinChannel,
@@ -13,14 +18,17 @@ import {
   reorderPinnedChannels,
   reorderPinnedThreads,
   saveModel,
+  searchMessages,
   setCategoryLayout,
   setPref,
+  setTriage,
   type StoreModel,
   unpinChannel,
   unpinThread,
   updateThreadPin
 } from './db'
 import { toRow } from './rest'
+import { parseQuery } from './search-query'
 import {
   type CategoryGroup,
   type ChannelRow,
@@ -28,9 +36,12 @@ import {
   type DmMemberRow,
   type DmRow,
   type GuildGroup,
+  type MessageRow,
   type PinnedChannelView,
   type PinnedThreadView,
   type PresenceStatus,
+  type SearchResult,
+  type SearchScopeOpts,
   type ThreadRow,
   type UnifiedState,
   CHANNEL_TYPE,
@@ -175,6 +186,172 @@ export class Store extends EventEmitter {
     reorderPinnedChannels(ids)
     this.reloadLocal()
     this.emit('change')
+  }
+
+  // --- message index + search (XR-3 / FR-4) -----------------------------
+
+  private indexOne(d: any, mentionsMe: boolean): void {
+    try {
+      indexMessage(toRow(d), {
+        guildId: d.guild_id ?? null,
+        channelId: d.channel_id,
+        mentionsMe,
+        mine: !!this.self && d.author?.id === this.self.id,
+        everyone: !!d.mention_everyone,
+        replyToMe: !!this.self && d.referenced_message?.author?.id === this.self.id
+      })
+    } catch (e) {
+      console.error('[store] index failed:', (e as Error).message)
+    }
+  }
+
+  /** Cache-on-read: index a page of messages fetched for a channel view. */
+  indexFetched(channelId: string, rows: MessageRow[]): void {
+    const guildId = this.channelContext(channelId).guildId || null
+    for (const row of rows) {
+      try {
+        indexMessage(row, {
+          guildId,
+          channelId,
+          mentionsMe: !!this.self && row.mentions.some((u) => u.id === this.self!.id),
+          mine: !!this.self && row.authorId === this.self.id
+        })
+      } catch {
+        /* best effort */
+      }
+    }
+  }
+
+  setMessageTriage(
+    messageId: string,
+    patch: { resolved?: boolean; starred?: boolean; snoozeUntil?: number | null }
+  ): void {
+    setTriage(messageId, patch)
+  }
+
+  search(queryString: string, opts: SearchScopeOpts): { results: SearchResult[]; indexed: number } {
+    const q = parseQuery(queryString)
+
+    let channelIds: string[] | null = null
+    const wanted = [...q.in, ...q.thread]
+    if (wanted.length) {
+      const frags = wanted.map((f) => f.toLowerCase())
+      const set = new Set<string>()
+      for (const g of this.guilds.values()) {
+        const gname = (g.properties?.name ?? g.name ?? '').toLowerCase()
+        const guildMatch = frags.some((f) => gname.includes(f))
+        for (const c of g.channels ?? []) {
+          if (!c.name || c.type === CATEGORY_TYPE) continue
+          if (guildMatch || frags.some((f) => c.name!.toLowerCase().includes(f))) set.add(c.id)
+        }
+      }
+      for (const t of this.threads.values())
+        if (t.name && frags.some((f) => t.name!.toLowerCase().includes(f))) set.add(t.id)
+      for (const dm of this.dmChannels.values())
+        if (frags.some((f) => this.dmDisplayName(dm).toLowerCase().includes(f))) set.add(dm.id)
+      channelIds = [...set]
+    }
+
+    const searchOpts: SearchOpts = {
+      channelIds,
+      guildId: opts.scope === 'all' ? null : opts.scope === 'dm' ? 'dm' : opts.scope,
+      excludeChannelIds: opts.excludeMuted ? this.mutedChannelIdSet() : [],
+      mentionsOnly: opts.mentionsOnly,
+      includeEveryone: opts.includeEveryone,
+      includeReplies: opts.includeReplies,
+      limit: opts.limit,
+      offset: opts.offset
+    }
+
+    let hits = searchMessages(q, searchOpts)
+
+    if (q.mentions.length) {
+      const frags = q.mentions.map((f) => f.toLowerCase())
+      hits = hits.filter((h) =>
+        h.row.mentions.some((u) => frags.some((f) => u.name.toLowerCase().includes(f)))
+      )
+    }
+    if (q.is.includes('unread')) hits = hits.filter((h) => this.hitUnread(h.channelId, h.id))
+
+    return { results: hits.map((h) => this.decorateHit(h)), indexed: indexedMessageCount() }
+  }
+
+  private hitUnread(channelId: string, messageId: string): boolean {
+    const rs = this.readStates.get(channelId)
+    if (!rs?.last_message_id || !/^\d+$/.test(messageId)) return true
+    return BigInt(messageId) > BigInt(rs.last_message_id)
+  }
+
+  private mutedChannelIdSet(): string[] {
+    const set = new Set(this.mutedChannels)
+    for (const gid of this.mutedGuilds)
+      for (const c of this.guilds.get(gid)?.channels ?? []) set.add(c.id)
+    return [...set]
+  }
+
+  private dmDisplayName(c: RawDm): string {
+    const ids = c.recipient_ids ?? c.recipients?.map((r) => r.id) ?? []
+    if (c.type === 3) return c.name?.trim() || ids.map((id) => this.userName(id)).join(', ') || 'Group DM'
+    return ids[0] ? this.userName(ids[0]) : 'Direct Message'
+  }
+
+  private channelContext(channelId: string): {
+    guildId: string
+    guildName: string
+    channelName: string
+    threadName: string | null
+    isDm: boolean
+  } {
+    const dm = this.dmChannels.get(channelId)
+    if (dm)
+      return {
+        guildId: '',
+        guildName: 'Direct Messages',
+        channelName: this.dmDisplayName(dm),
+        threadName: null,
+        isDm: true
+      }
+    const th = this.threads.get(channelId)
+    if (th) {
+      const g = th.guild_id ? this.guilds.get(th.guild_id) : undefined
+      const parent = g?.channels?.find((c) => c.id === th.parent_id)
+      return {
+        guildId: th.guild_id ?? '',
+        guildName: g?.properties?.name ?? g?.name ?? '',
+        channelName: parent?.name ?? 'channel',
+        threadName: th.name ?? 'thread',
+        isDm: false
+      }
+    }
+    for (const g of this.guilds.values()) {
+      const c = g.channels?.find((x) => x.id === channelId)
+      if (c)
+        return {
+          guildId: g.id,
+          guildName: g.properties?.name ?? g.name ?? '',
+          channelName: c.name ?? 'channel',
+          threadName: null,
+          isDm: false
+        }
+    }
+    return { guildId: '', guildName: '', channelName: 'unknown', threadName: null, isDm: false }
+  }
+
+  private decorateHit(h: SearchHit): SearchResult {
+    const ctx = this.channelContext(h.channelId)
+    return {
+      ...h.row,
+      channelId: h.channelId,
+      guildId: ctx.guildId,
+      guildName: ctx.guildName,
+      channelName: ctx.channelName,
+      threadName: ctx.threadName,
+      isDm: ctx.isDm,
+      unread: this.hitUnread(h.channelId, h.id),
+      resolved: h.resolved,
+      starred: h.starred,
+      snoozeUntil: h.snoozeUntil
+    }
   }
 
   setCategoryLayout(
@@ -355,6 +532,7 @@ export class Store extends EventEmitter {
           rsEntry.mention_count = (rsEntry.mention_count ?? 0) + 1
           this.readStates.set(d.channel_id, rsEntry)
         }
+        this.indexOne(d, mentionsMe)
         this.emit('message', { kind: 'create', channelId: d.channel_id, message: toRow(d) })
         this.emit('change')
         break
@@ -362,12 +540,23 @@ export class Store extends EventEmitter {
 
       case 'MESSAGE_UPDATE': {
         if (d.id && d.channel_id) {
+          if (d.timestamp && d.author) {
+            const mm =
+              Array.isArray(d.mentions) &&
+              d.mentions.some((m: { id: string }) => m.id === this.self?.id)
+            this.indexOne(d, mm)
+          }
           this.emit('message', { kind: 'update', channelId: d.channel_id, message: toRow(d) })
         }
         break
       }
       case 'MESSAGE_DELETE': {
         if (d.id && d.channel_id) {
+          try {
+            deleteIndexedMessage(d.id)
+          } catch {
+            /* index best-effort */
+          }
           this.emit('message', { kind: 'delete', channelId: d.channel_id, id: d.id })
         }
         break

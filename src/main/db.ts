@@ -7,8 +7,13 @@
 import { join } from 'node:path'
 import { app } from 'electron'
 import Database from 'better-sqlite3'
+import type { MessageRow } from '@shared/types'
+import type { ParsedQuery } from './search-query'
+import { MSG_FLAG, type SearchOpts, buildSearchSql } from './search-sql'
 
-const SCHEMA_VERSION = 3
+export type { SearchOpts }
+
+const SCHEMA_VERSION = 4
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -60,26 +65,38 @@ CREATE TABLE IF NOT EXISTS muted (
   kind TEXT NOT NULL          -- 'guild' | 'channel'
 );
 
--- message cache and full-text index. No code writes to these yet.
+-- message cache and full-text index (XR-3). Populated live from MESSAGE_CREATE,
+-- on channel scroll, and by the FR-4 mentions backfill.
+-- flags: bit0 mentions-me, bit1 authored-by-me, bit2 link, bit3 image,
+--        bit4 file, bit5 video, bit6 embed, bit7 code, bit8 edited.
 CREATE TABLE IF NOT EXISTS messages (
-  id         TEXT PRIMARY KEY,
-  channel_id TEXT NOT NULL,
-  guild_id   TEXT,
-  author_id  TEXT,
-  created_at TEXT,
-  edited_at  TEXT,
-  flags      INTEGER NOT NULL DEFAULT 0,   -- bit0 mentions-me, bit1 authored-by-me
-  data       TEXT NOT NULL
+  id          TEXT PRIMARY KEY,
+  channel_id  TEXT NOT NULL,
+  guild_id    TEXT,
+  author_id   TEXT,
+  author_name TEXT,
+  created_at  TEXT,
+  edited_at   TEXT,
+  flags       INTEGER NOT NULL DEFAULT 0,
+  data        TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, id);
-CREATE INDEX IF NOT EXISTS idx_messages_author  ON messages(author_id);
+CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
   content,
   author_name,
   message_id UNINDEXED,
-  channel_id UNINDEXED,
   tokenize = 'unicode61 remove_diacritics 2'
+);
+
+-- Harmony-local triage state for the mentions inbox (FR-4).
+CREATE TABLE IF NOT EXISTS message_triage (
+  message_id   TEXT PRIMARY KEY,
+  resolved     INTEGER NOT NULL DEFAULT 0,
+  starred      INTEGER NOT NULL DEFAULT 0,
+  snooze_until INTEGER,
+  updated_at   INTEGER NOT NULL
 );
 
 -- Harmony-local layout state (never sent to Discord). FR-3 / FR-6 / FR-7.
@@ -117,6 +134,9 @@ export function db(): Database.Database {
   const d = new Database(join(app.getPath('userData'), 'harmony.db'))
   d.pragma('journal_mode = WAL')
   d.pragma('synchronous = NORMAL')
+  const from = d.pragma('user_version', { simple: true }) as number
+  // v4 reshapes the (unpopulated) message index; safe to drop and recreate.
+  if (from < 4) d.exec('DROP TABLE IF EXISTS messages; DROP TABLE IF EXISTS messages_fts;')
   d.exec(SCHEMA)
   d.pragma(`user_version = ${SCHEMA_VERSION}`)
   handle = d
@@ -430,6 +450,158 @@ export function reorderPinnedCategories(orderedIds: string[]): void {
   run(orderedIds)
 }
 
+// --- message index + search (XR-3) ------------------------------------
+
+const F = MSG_FLAG
+const IMG_RE = /\.(png|jpe?g|gif|webp|avif|bmp|svg)$/i
+const VID_RE = /\.(mp4|mov|webm|mkv|avi|m4v)$/i
+
+interface IndexMeta {
+  guildId: string | null
+  channelId: string
+  mentionsMe: boolean
+  mine: boolean
+  everyone?: boolean
+  replyToMe?: boolean
+}
+
+function messageFlags(row: MessageRow, meta: IndexMeta): number {
+  let f = 0
+  if (meta.mentionsMe) f |= F.mention
+  if (meta.mine) f |= F.mine
+  if (meta.everyone) f |= F.everyone
+  if (meta.replyToMe) f |= F.replyToMe
+  if (/https?:\/\/\S+/i.test(row.content)) f |= F.link
+  if (/(^|[^`])`[^`]|```/.test(row.content)) f |= F.code
+  if (row.editedTimestamp) f |= F.edited
+  if (row.embedCount > 0) f |= F.embed
+  for (const a of row.attachments) {
+    if (IMG_RE.test(a.name)) f |= F.image
+    else if (VID_RE.test(a.name)) f |= F.video
+    else f |= F.file
+  }
+  return f
+}
+
+export function indexMessage(row: MessageRow, meta: IndexMeta): void {
+  if (row.system || !row.id) return
+  const d = db()
+  const flags = messageFlags(row, meta)
+  const run = d.transaction(() => {
+    d.prepare(
+      `INSERT INTO messages (id, channel_id, guild_id, author_id, author_name, created_at, edited_at, flags, data)
+       VALUES (@id, @channel_id, @guild_id, @author_id, @author_name, @created_at, @edited_at, @flags, @data)
+       ON CONFLICT(id) DO UPDATE SET
+         author_name = excluded.author_name, created_at = excluded.created_at,
+         edited_at = excluded.edited_at, flags = excluded.flags, data = excluded.data`
+    ).run({
+      id: row.id,
+      channel_id: meta.channelId,
+      guild_id: meta.guildId,
+      author_id: row.authorId,
+      author_name: row.authorName,
+      created_at: row.timestamp,
+      edited_at: row.editedTimestamp,
+      flags,
+      data: JSON.stringify(row)
+    })
+    d.prepare('DELETE FROM messages_fts WHERE message_id = ?').run(row.id)
+    d.prepare(
+      'INSERT INTO messages_fts (content, author_name, message_id) VALUES (?, ?, ?)'
+    ).run(row.content, row.authorName, row.id)
+  })
+  run()
+}
+
+export function deleteIndexedMessage(id: string): void {
+  const d = db()
+  d.prepare('DELETE FROM messages WHERE id = ?').run(id)
+  d.prepare('DELETE FROM messages_fts WHERE message_id = ?').run(id)
+}
+
+export function indexedMessageCount(): number {
+  return (db().prepare('SELECT count(*) c FROM messages').get() as { c: number }).c
+}
+
+export interface SearchHit {
+  id: string
+  channelId: string
+  guildId: string | null
+  row: MessageRow
+  resolved: boolean
+  starred: boolean
+  snoozeUntil: number | null
+}
+
+export function searchMessages(q: ParsedQuery, opts: SearchOpts = {}): SearchHit[] {
+  const d = db()
+  const { where, params } = buildSearchSql(q, opts)
+  params.limit = opts.limit ?? 100
+  params.offset = opts.offset ?? 0
+
+  const rows = d
+    .prepare(
+      `SELECT m.id, m.channel_id, m.guild_id, m.data,
+              COALESCE(t.resolved, 0) AS resolved,
+              COALESCE(t.starred, 0)  AS starred,
+              t.snooze_until          AS snooze_until
+         FROM messages m
+         LEFT JOIN message_triage t ON t.message_id = m.id
+        WHERE ${where}
+        ORDER BY m.created_at DESC, m.id DESC
+        LIMIT @limit OFFSET @offset`
+    )
+    .all(params) as {
+    id: string
+    channel_id: string
+    guild_id: string | null
+    data: string
+    resolved: number
+    starred: number
+    snooze_until: number | null
+  }[]
+
+  return rows.map((r) => ({
+    id: r.id,
+    channelId: r.channel_id,
+    guildId: r.guild_id,
+    row: JSON.parse(r.data) as MessageRow,
+    resolved: !!r.resolved,
+    starred: !!r.starred,
+    snoozeUntil: r.snooze_until
+  }))
+}
+
+export function setTriage(
+  messageId: string,
+  patch: { resolved?: boolean; starred?: boolean; snoozeUntil?: number | null }
+): void {
+  const d = db()
+  d.prepare(
+    `INSERT INTO message_triage (message_id, resolved, starred, snooze_until, updated_at)
+     VALUES (@id, 0, 0, NULL, @now)
+     ON CONFLICT(message_id) DO NOTHING`
+  ).run({ id: messageId, now: Date.now() })
+  if (patch.resolved !== undefined)
+    d.prepare('UPDATE message_triage SET resolved = ?, updated_at = ? WHERE message_id = ?').run(
+      patch.resolved ? 1 : 0,
+      Date.now(),
+      messageId
+    )
+  if (patch.starred !== undefined)
+    d.prepare('UPDATE message_triage SET starred = ?, updated_at = ? WHERE message_id = ?').run(
+      patch.starred ? 1 : 0,
+      Date.now(),
+      messageId
+    )
+  if (patch.snoozeUntil !== undefined)
+    d.prepare('UPDATE message_triage SET snooze_until = ?, updated_at = ? WHERE message_id = ?').run(
+      patch.snoozeUntil,
+      Date.now(),
+      messageId
+    )
+}
+
 /** Wipe every table — used on sign-out so the local cache really is cleared. */
 export function clearModel(): void {
   const d = db()
@@ -443,6 +615,7 @@ export function clearModel(): void {
     'muted',
     'messages',
     'messages_fts',
+    'message_triage',
     'meta'
   ]
   const run = d.transaction(() => {

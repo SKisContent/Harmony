@@ -20,7 +20,12 @@ const mockDb = vi.hoisted(() => {
     unpinChannel: vi.fn(),
     reorderPinnedChannels: vi.fn(),
     setCategoryLayout: vi.fn(),
-    reorderPinnedCategories: vi.fn()
+    reorderPinnedCategories: vi.fn(),
+    indexMessage: vi.fn(),
+    deleteIndexedMessage: vi.fn(),
+    indexedMessageCount: vi.fn(() => 42),
+    setTriage: vi.fn(),
+    searchMessages: vi.fn(() => [] as unknown[])
   }
 })
 vi.mock('./db', () => mockDb)
@@ -341,5 +346,97 @@ describe('channel pinning', () => {
 
     store.setChannelPinned('c1', 'g1', false)
     expect(mockDb.unpinChannel).toHaveBeenCalledWith('c1')
+  })
+})
+
+describe('search (XR-3)', () => {
+  const hit = (over: Record<string, unknown> = {}) => ({
+    id: 'm1',
+    channelId: 'c1',
+    guildId: 'g1',
+    row: {
+      id: 'm1',
+      authorId: 'u2',
+      authorName: 'Bob',
+      content: 'hi there',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      editedTimestamp: null,
+      attachments: [],
+      embedCount: 0,
+      replyTo: null,
+      system: false,
+      mentions: [{ id: 'me', name: 'Me' }],
+      reactions: []
+    },
+    resolved: false,
+    starred: false,
+    snoozeUntil: null,
+    ...over
+  })
+
+  it('resolves in:#name to channel ids and passes scope through', () => {
+    const store = newStore()
+    store.ingest('READY', ready({ channels: [{ id: 'c1', name: 'general' }] }))
+    mockDb.searchMessages.mockReturnValueOnce([hit()])
+
+    const out = store.search('in:#general hello', {
+      scope: 'g1',
+      excludeMuted: false,
+      mentionsOnly: false,
+      includeEveryone: false,
+      includeReplies: false,
+      limit: 50,
+      offset: 0
+    })
+
+    const [, opts] = mockDb.searchMessages.mock.calls[0] as unknown as [unknown, { channelIds: string[]; guildId: string }]
+    expect(opts.channelIds).toEqual(['c1'])
+    expect(opts.guildId).toBe('g1')
+    expect(out.indexed).toBe(42)
+    expect(out.results[0]).toMatchObject({ guildName: 'Acme', channelName: 'general', id: 'm1' })
+  })
+
+  it('post-filters mentions:@name against the row', () => {
+    const store = newStore()
+    store.ingest('READY', ready({ channels: [{ id: 'c1', name: 'general' }] }))
+    mockDb.searchMessages.mockReturnValueOnce([
+      hit({ id: 'a', row: { ...hit().row, id: 'a', mentions: [{ id: 'x', name: 'Alice' }] } }),
+      hit({ id: 'b', row: { ...hit().row, id: 'b', mentions: [{ id: 'y', name: 'Zed' }] } })
+    ])
+    const out = store.search('mentions:@alice', {
+      scope: 'all',
+      excludeMuted: false,
+      mentionsOnly: false,
+      includeEveryone: false,
+      includeReplies: false,
+      limit: 50,
+      offset: 0
+    })
+    expect(out.results.map((r) => r.id)).toEqual(['a'])
+  })
+
+  it('setMessageTriage forwards to the db', () => {
+    const store = newStore()
+    store.setMessageTriage('m9', { resolved: true })
+    expect(mockDb.setTriage).toHaveBeenCalledWith('m9', { resolved: true })
+  })
+
+  it('indexes a MESSAGE_CREATE', () => {
+    const store = newStore()
+    store.ingest('READY', ready({ channels: [{ id: 'c1', name: 'general' }] }))
+    mockDb.indexMessage.mockClear()
+    store.ingest('MESSAGE_CREATE', {
+      id: 'x1',
+      channel_id: 'c1',
+      guild_id: 'g1',
+      content: 'hello world',
+      timestamp: '2026-02-02T00:00:00.000Z',
+      author: { id: 'u3', username: 'cara' },
+      mentions: [{ id: 'me' }]
+    })
+    expect(mockDb.indexMessage).toHaveBeenCalledTimes(1)
+    const [row, meta] = mockDb.indexMessage.mock.calls[0] as unknown as [{ content: string }, { mentionsMe: boolean }]
+    expect(row.content).toBe('hello world')
+    expect(meta.mentionsMe).toBe(true)
   })
 })

@@ -1,7 +1,6 @@
 import { join } from 'node:path'
 import { BrowserWindow, app, ipcMain, shell } from 'electron'
-import type { UnifiedState } from '@shared/types'
-import type { UploadedAttachment } from '@shared/types'
+import type { SearchScopeOpts, UnifiedState, UploadedAttachment } from '@shared/types'
 import { captureTokenViaLogin, clearToken, loadToken, saveToken } from './auth'
 import { Gateway } from './gateway'
 import {
@@ -124,11 +123,27 @@ ipcMain.handle('harmony:getMessages', async (_e, channelId: string, before?: str
   if (!token) return { ok: false, error: 'Not signed in.' }
   try {
     const messages = await getMessages(channelId, token, 50, before)
+    store.indexFetched(channelId, messages)
     return { ok: true, messages }
   } catch (e) {
     return { ok: false, error: (e as Error).message }
   }
 })
+
+ipcMain.handle('harmony:search', (_e, query: string, opts: SearchScopeOpts) => {
+  try {
+    return { ok: true, ...store.search(query ?? '', opts) }
+  } catch (e) {
+    return { ok: false, error: (e as Error).message }
+  }
+})
+
+ipcMain.handle(
+  'harmony:setMessageTriage',
+  (_e, messageId: string, patch: { resolved?: boolean; starred?: boolean; snoozeUntil?: number | null }) => {
+    store.setMessageTriage(messageId, patch ?? {})
+  }
+)
 
 ipcMain.handle('harmony:getThreads', async (_e, channelId: string) => {
   const token = currentToken ?? loadToken()

@@ -1,6 +1,7 @@
 import { type ReactElement, useEffect, useMemo, useState } from 'react'
 import type { CategoryGroup, MessageRow, UnifiedState } from '@shared/types'
 import { MessagePane } from './MessagePane'
+import { SearchPane } from './SearchPane'
 import { LogoAvatar } from './LogoAvatar'
 
 const STATUS_LABEL: Record<string, string> = {
@@ -104,7 +105,9 @@ export function App(): ReactElement {
   const [unreadOnly, setUnreadOnly] = usePersistedState<boolean>('unreadOnly', false)
   const [hideMuted, setHideMuted] = usePersistedState<boolean>('hideMuted', true)
   const [catSort, setCatSort] = usePersistedState<CatSort>('catSort', 'alpha')
-  const [mode, setMode] = usePersistedState<'servers' | 'dms' | 'pinned'>('mode', 'servers')
+  const [mode, setMode] = usePersistedState<
+    'servers' | 'dms' | 'pinned' | 'mentions' | 'search'
+  >('mode', 'servers')
   const [selection, setSelection] = useState<Selection | null>(null)
   const [revealed, toggleRevealed] = usePersistedSet('revealedGuilds')
 
@@ -302,6 +305,19 @@ export function App(): ReactElement {
                 ) ? (
                   <span className="seg-dot" />
                 ) : null}
+              </button>
+              <button
+                className={mode === 'mentions' ? 'seg on' : 'seg'}
+                onClick={() => setMode('mentions')}
+              >
+                Mentions
+                {state && state.counts.mentions > 0 ? <span className="seg-dot" /> : null}
+              </button>
+              <button
+                className={mode === 'search' ? 'seg on' : 'seg'}
+                onClick={() => setMode('search')}
+              >
+                Search
               </button>
             </div>
 
@@ -818,13 +834,26 @@ export function App(): ReactElement {
           </aside>
 
           <main className="content">
-            <MessagePane
-              selection={selection}
-              channelNames={channelNames}
-              pinnedThreadIds={pinnedThreadIds}
-              selfId={state?.self?.id ?? ''}
-              onOpen={setSelection}
-            />
+            {mode === 'search' || mode === 'mentions' ? (
+              <SearchPane
+                mode={mode}
+                guilds={(state?.guilds ?? []).map((g) => ({ id: g.id, name: g.name }))}
+                channelNames={channelNames}
+                selection={selection}
+                onOpen={(sel) => {
+                  setSelection(sel)
+                  setMode('servers')
+                }}
+              />
+            ) : (
+              <MessagePane
+                selection={selection}
+                channelNames={channelNames}
+                pinnedThreadIds={pinnedThreadIds}
+                selfId={state?.self?.id ?? ''}
+                onOpen={setSelection}
+              />
+            )}
           </main>
         </div>
       )}

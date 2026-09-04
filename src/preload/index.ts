@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type {
   HarmonyApi,
   LiveMessage,
+  SearchScopeOpts,
   TypingEvent,
   UnifiedState,
   UploadedAttachment
@@ -28,6 +29,12 @@ const api: HarmonyApi = {
     ipcRenderer.invoke('harmony:react', channelId, messageId, emoji, add),
   reactionUsers: (channelId: string, messageId: string, emoji: string) =>
     ipcRenderer.invoke('harmony:reactionUsers', channelId, messageId, emoji),
+  search: (query: string, opts: SearchScopeOpts) =>
+    ipcRenderer.invoke('harmony:search', query, opts),
+  setMessageTriage: (
+    messageId: string,
+    patch: { resolved?: boolean; starred?: boolean; snoozeUntil?: number | null }
+  ) => ipcRenderer.invoke('harmony:setMessageTriage', messageId, patch),
   ackChannel: (channelId: string, messageId: string) =>
     ipcRenderer.invoke('harmony:ackChannel', channelId, messageId),
   setMuted: (target: { guildId?: string; channelId?: string }, muted: boolean) =>

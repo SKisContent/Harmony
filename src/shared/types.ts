@@ -226,6 +226,33 @@ export interface TypingEvent {
   userName: string
 }
 
+/** One hit from the message index (XR-3 / FR-4), with breadcrumb + triage. */
+export interface SearchResult extends MessageRow {
+  channelId: string
+  guildId: string
+  guildName: string
+  channelName: string
+  threadName: string | null
+  isDm: boolean
+  unread: boolean
+  resolved: boolean
+  starred: boolean
+  snoozeUntil: number | null
+}
+
+export interface SearchScopeOpts {
+  /** 'all' · 'dm' · a guild id */
+  scope: string
+  excludeMuted: boolean
+  /** FR-4 — restrict to messages that mention me */
+  mentionsOnly: boolean
+  /** widen mentionsOnly to also include @everyone/@here and replies to me */
+  includeEveryone: boolean
+  includeReplies: boolean
+  limit: number
+  offset: number
+}
+
 export interface UploadedAttachment {
   id: string
   filename: string
@@ -269,6 +296,14 @@ export interface HarmonyApi {
     messageId: string,
     emoji: string
   ): Promise<{ ok: boolean; users?: { id: string; name: string }[]; error?: string }>
+  search(
+    query: string,
+    opts: SearchScopeOpts
+  ): Promise<{ ok: boolean; results?: SearchResult[]; indexed?: number; error?: string }>
+  setMessageTriage(
+    messageId: string,
+    patch: { resolved?: boolean; starred?: boolean; snoozeUntil?: number | null }
+  ): Promise<void>
   ackChannel(channelId: string, messageId: string): Promise<void>
   setMuted(
     target: { guildId?: string; channelId?: string },
