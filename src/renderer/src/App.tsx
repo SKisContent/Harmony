@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { type ReactElement, useEffect, useMemo, useState } from 'react'
 import type { CategoryGroup, MessageRow, UnifiedState } from '@shared/types'
 import { MessagePane } from './MessagePane'
 import { LogoAvatar } from './LogoAvatar'
@@ -97,7 +97,7 @@ function usePersistedSet(key: string): [Set<string>, (id: string) => void] {
   return [set, toggle]
 }
 
-export function App(): JSX.Element {
+export function App(): ReactElement {
   const [state, setState] = useState<UnifiedState | null>(null)
   const [busy, setBusy] = useState(false)
   const [scope, setScope] = usePersistedState<string>('scope', 'all')
