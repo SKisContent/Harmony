@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
+  BackfillProgress,
   HarmonyApi,
   LiveMessage,
   SearchScopeOpts,
@@ -35,6 +36,12 @@ const api: HarmonyApi = {
     messageId: string,
     patch: { resolved?: boolean; starred?: boolean; snoozeUntil?: number | null }
   ) => ipcRenderer.invoke('harmony:setMessageTriage', messageId, patch),
+  backfillMentions: () => ipcRenderer.invoke('harmony:backfillMentions'),
+  onBackfill: (cb: (p: BackfillProgress) => void) => {
+    const listener = (_e: unknown, p: BackfillProgress) => cb(p)
+    ipcRenderer.on('harmony:backfill', listener)
+    return () => ipcRenderer.removeListener('harmony:backfill', listener)
+  },
   ackChannel: (channelId: string, messageId: string) =>
     ipcRenderer.invoke('harmony:ackChannel', channelId, messageId),
   setMuted: (target: { guildId?: string; channelId?: string }, muted: boolean) =>

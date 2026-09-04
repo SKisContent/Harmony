@@ -12,11 +12,13 @@ import {
   getReactionUsers,
   getThreads,
   removeReaction,
+  searchGuildMentions,
   sendMessage,
   setMuted,
   startTyping,
   uploadAttachment
 } from './rest'
+import { nextSweep } from './backfill-plan'
 import { Store } from './store'
 
 let win: BrowserWindow | null = null
@@ -144,6 +146,72 @@ ipcMain.handle(
     store.setMessageTriage(messageId, patch ?? {})
   }
 )
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+let backfillRunning = false
+
+async function runMentionBackfill(token: string): Promise<{ indexed: number }> {
+  const self = store.selfId()
+  if (!self) return { indexed: 0 }
+  const guildIds = store.guildIds()
+  let indexed = 0
+
+  for (let gi = 0; gi < guildIds.length; gi++) {
+    const gid = guildIds[gi]
+    let state = { offset: 0, maxId: null as string | null }
+    const seen = new Set<string>()
+    let guardPages = 0
+
+    while (guardPages++ < 2000) {
+      let page
+      try {
+        page = await searchGuildMentions(gid, self, token, state.offset, state.maxId ?? undefined)
+      } catch (e) {
+        if (/Rate limited/.test((e as Error).message)) {
+          await sleep(2500)
+          continue
+        }
+        break // no access / other error — move to the next guild
+      }
+      if (page.indexing) {
+        await sleep(3000)
+        continue
+      }
+      const fresh = page.hits.filter((m) => !seen.has(m.id))
+      for (const m of fresh) seen.add(m.id)
+      indexed += store.indexMentionHits(gid, fresh)
+      win?.webContents.send('harmony:backfill', {
+        guild: gi + 1,
+        guilds: guildIds.length,
+        indexed,
+        done: false
+      })
+
+      const oldestId = page.hits.length ? page.hits[page.hits.length - 1].id : null
+      const next = nextSweep(state, { count: page.hits.length, oldestId })
+      if (next === 'done') break
+      state = next
+      await sleep(600)
+    }
+  }
+
+  win?.webContents.send('harmony:backfill', { guild: guildIds.length, guilds: guildIds.length, indexed, done: true })
+  return { indexed }
+}
+
+ipcMain.handle('harmony:backfillMentions', async () => {
+  if (backfillRunning) return { ok: false, error: 'A backfill is already running.' }
+  const token = currentToken ?? loadToken()
+  if (!token) return { ok: false, error: 'Not signed in.' }
+  backfillRunning = true
+  try {
+    return { ok: true, ...(await runMentionBackfill(token)) }
+  } catch (e) {
+    return { ok: false, error: (e as Error).message }
+  } finally {
+    backfillRunning = false
+  }
+})
 
 ipcMain.handle('harmony:getThreads', async (_e, channelId: string) => {
   const token = currentToken ?? loadToken()

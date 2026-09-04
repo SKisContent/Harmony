@@ -95,14 +95,20 @@ export interface RawMessage {
   timestamp?: string
   edited_timestamp?: string | null
   channel_id?: string
+  guild_id?: string
   author?: { id: string; username?: string; global_name?: string | null }
   member?: { nick?: string | null }
   mentions?: { id: string; username?: string; global_name?: string | null }[]
+  mention_everyone?: boolean
   attachments?: { filename: string; url: string; size: number }[]
   embeds?: unknown[]
   type?: number
   reactions?: { emoji: RawEmoji; count: number; me: boolean }[]
-  referenced_message?: { author?: { global_name?: string | null; username?: string } } | null
+  referenced_message?: {
+    author?: { id?: string; global_name?: string | null; username?: string }
+  } | null
+  /** set on the matching message within a /search context group */
+  hit?: boolean
 }
 
 /** The token Discord's reaction endpoints want in the URL. */
@@ -233,6 +239,39 @@ export async function getReactionUsers(
 
 export function ackMessage(channelId: string, messageId: string, token: string): Promise<void> {
   return apiPost(`/channels/${channelId}/messages/${messageId}/ack`, token, { token: null })
+}
+
+export interface MentionSearchPage {
+  hits: RawMessage[]
+  total: number
+  /** Discord is still building this guild's search index — retry with backoff. */
+  indexing: boolean
+}
+
+/** One page of `/guilds/{id}/messages/search?mentions={me}` (docs §11.4). */
+export async function searchGuildMentions(
+  guildId: string,
+  self: string,
+  token: string,
+  offset: number,
+  maxId?: string
+): Promise<MentionSearchPage> {
+  const q = new URLSearchParams({
+    mentions: self,
+    sort_by: 'timestamp',
+    sort_order: 'desc',
+    offset: String(offset)
+  })
+  if (maxId) q.set('max_id', maxId)
+  const res = await apiGet<{
+    messages?: RawMessage[][]
+    total_results?: number
+    doing_deep_historical_index?: boolean
+  }>(`/guilds/${guildId}/messages/search?${q}`, token)
+  const hits = (res.messages ?? [])
+    .map((group) => group.find((m) => m.hit) ?? group[0])
+    .filter((m): m is RawMessage => !!m)
+  return { hits, total: res.total_results ?? 0, indexing: !!res.doing_deep_historical_index }
 }
 
 export function startTyping(channelId: string, token: string): Promise<void> {

@@ -1659,3 +1659,14 @@ h3.md-h {
 .sr-actions button.on {
   color: var(--accent);
 }
+
+.sync-btn {
+  padding: 3px 10px;
+  font-size: 11px;
+}
+
+.search-backfill {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}

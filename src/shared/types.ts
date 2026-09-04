@@ -226,6 +226,13 @@ export interface TypingEvent {
   userName: string
 }
 
+export interface BackfillProgress {
+  guild: number
+  guilds: number
+  indexed: number
+  done: boolean
+}
+
 /** One hit from the message index (XR-3 / FR-4), with breadcrumb + triage. */
 export interface SearchResult extends MessageRow {
   channelId: string
@@ -304,6 +311,8 @@ export interface HarmonyApi {
     messageId: string,
     patch: { resolved?: boolean; starred?: boolean; snoozeUntil?: number | null }
   ): Promise<void>
+  backfillMentions(): Promise<{ ok: boolean; indexed?: number; error?: string }>
+  onBackfill(cb: (p: BackfillProgress) => void): () => void
   ackChannel(channelId: string, messageId: string): Promise<void>
   setMuted(
     target: { guildId?: string; channelId?: string },

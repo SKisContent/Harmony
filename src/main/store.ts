@@ -229,6 +229,36 @@ export class Store extends EventEmitter {
     setTriage(messageId, patch)
   }
 
+  selfId(): string {
+    return this.self?.id ?? ''
+  }
+
+  guildIds(): string[] {
+    return [...this.guilds.keys()]
+  }
+
+  /** Index a batch of `/search?mentions={me}` hits (FR-4 backfill). */
+  indexMentionHits(guildId: string, raws: unknown[]): number {
+    let n = 0
+    for (const m of raws as any[]) {
+      if (!m?.id || !m.channel_id) continue
+      try {
+        indexMessage(toRow(m), {
+          guildId,
+          channelId: m.channel_id,
+          mentionsMe: true,
+          mine: !!this.self && m.author?.id === this.self.id,
+          everyone: !!m.mention_everyone,
+          replyToMe: !!this.self && m.referenced_message?.author?.id === this.self.id
+        })
+        n++
+      } catch {
+        /* best effort */
+      }
+    }
+    return n
+  }
+
   search(queryString: string, opts: SearchScopeOpts): { results: SearchResult[]; indexed: number } {
     const q = parseQuery(queryString)
 

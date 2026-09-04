@@ -35,7 +35,13 @@ function result(over: Partial<SearchResult> = {}): SearchResult {
 function mount(mode: 'search' | 'mentions', results: SearchResult[] = []) {
   const search = vi.fn().mockResolvedValue({ ok: true, results, indexed: results.length })
   const setMessageTriage = vi.fn().mockResolvedValue(undefined)
-  ;(window as unknown as { harmony: unknown }).harmony = { search, setMessageTriage }
+  const backfillMentions = vi.fn().mockResolvedValue({ ok: true, indexed: 0 })
+  ;(window as unknown as { harmony: unknown }).harmony = {
+    search,
+    setMessageTriage,
+    backfillMentions,
+    onBackfill: () => () => {}
+  }
   const onOpen = vi.fn()
   render(
     <SearchPane
@@ -46,7 +52,7 @@ function mount(mode: 'search' | 'mentions', results: SearchResult[] = []) {
       onOpen={onOpen}
     />
   )
-  return { search, setMessageTriage, onOpen }
+  return { search, setMessageTriage, backfillMentions, onOpen }
 }
 
 afterEach(() => vi.restoreAllMocks())
@@ -79,6 +85,13 @@ describe('SearchPane', () => {
     expect(onOpen).toHaveBeenCalledWith(
       expect.objectContaining({ channelId: 'c1', channelName: 'launch', isThread: true })
     )
+  })
+
+  it('kicks off a mentions backfill from the Sync button', async () => {
+    const user = userEvent.setup()
+    const { backfillMentions } = mount('mentions', [])
+    await user.click(screen.getByRole('button', { name: /Sync mentions/ }))
+    expect(backfillMentions).toHaveBeenCalled()
   })
 
   it('stars and resolves a mention', async () => {

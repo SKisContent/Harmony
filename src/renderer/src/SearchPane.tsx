@@ -31,6 +31,10 @@ export function SearchPane({
   const [results, setResults] = useState<SearchResult[]>([])
   const [indexed, setIndexed] = useState(0)
   const [loading, setLoading] = useState(false)
+  const [backfill, setBackfill] = useState<{ running: boolean; label: string }>({
+    running: false,
+    label: ''
+  })
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const mentionsMode = mode === 'mentions'
@@ -66,6 +70,25 @@ export function SearchPane({
       if (timer.current) clearTimeout(timer.current)
     }
   }, [query, run])
+
+  useEffect(() => {
+    return window.harmony.onBackfill((p) => {
+      setBackfill({
+        running: !p.done,
+        label: p.done
+          ? `Indexed ${p.indexed.toLocaleString()} mentions.`
+          : `Syncing… server ${p.guild}/${p.guilds}, ${p.indexed.toLocaleString()} found`
+      })
+      if (p.done) run(query.trim())
+    })
+  }, [run, query])
+
+  const startBackfill = (): void => {
+    setBackfill({ running: true, label: 'Starting…' })
+    void window.harmony.backfillMentions().then((res) => {
+      if (!res.ok) setBackfill({ running: false, label: res.error ?? 'Backfill failed.' })
+    })
+  }
 
   const jump = (r: SearchResult): void => {
     onOpen({
@@ -153,9 +176,17 @@ export function SearchPane({
                 />
                 Show resolved
               </label>
+              <button
+                className="ghost sync-btn"
+                disabled={backfill.running}
+                onClick={startBackfill}
+              >
+                {backfill.running ? 'Syncing…' : 'Sync mentions'}
+              </button>
             </>
           )}
         </div>
+        {backfill.label && <div className="search-backfill">{backfill.label}</div>}
       </div>
 
       <div className="search-results">
