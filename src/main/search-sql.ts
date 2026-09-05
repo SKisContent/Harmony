@@ -37,6 +37,10 @@ export interface SearchOpts {
   /** widen mentionsOnly to also include @everyone/@here and replies to me */
   includeEveryone?: boolean
   includeReplies?: boolean
+  /** FR-5 — only messages I authored */
+  mineOnly?: boolean
+  /** result ordering by timestamp; defaults to 'newest' */
+  orderBy?: 'newest' | 'oldest'
   limit?: number
   offset?: number
 }
@@ -60,6 +64,7 @@ export function buildSearchSql(
     if (opts.includeReplies) bits |= MSG_FLAG.replyToMe
     where.push(`(m.flags & ${bits}) != 0`)
   }
+  if (opts.mineOnly || q.is.includes('mine')) where.push(`(m.flags & ${MSG_FLAG.mine}) != 0`)
   if (q.is.includes('edited')) where.push(`(m.flags & ${MSG_FLAG.edited}) != 0`)
   if (q.is.includes('resolved')) where.push('t.resolved = 1')
   if (q.is.includes('starred')) where.push('t.starred = 1')

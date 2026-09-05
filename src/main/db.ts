@@ -13,7 +13,7 @@ import { MSG_FLAG, type SearchOpts, buildSearchSql } from './search-sql'
 
 export type { SearchOpts }
 
-const SCHEMA_VERSION = 4
+const SCHEMA_VERSION = 5
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -125,6 +125,22 @@ CREATE TABLE IF NOT EXISTS category_layout (
 );
 
 CREATE TABLE IF NOT EXISTS prefs (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
+-- Harmony-local saved messages (FR-8). Content is snapshotted at save time so a
+-- bookmark survives the upstream message being edited or deleted.
+--   snapshot: { row: MessageRow, ctx: {...breadcrumb} } as it was when saved
+--   latest:   the most recent MessageRow Harmony has seen (for "refresh snapshot")
+CREATE TABLE IF NOT EXISTS bookmarks (
+  message_id       TEXT PRIMARY KEY,
+  channel_id       TEXT NOT NULL,
+  saved_at         INTEGER NOT NULL,
+  note             TEXT,
+  label            TEXT,
+  edited_since     INTEGER NOT NULL DEFAULT 0,
+  deleted_upstream INTEGER NOT NULL DEFAULT 0,
+  snapshot         TEXT NOT NULL,
+  latest           TEXT
+);
 `
 
 let handle: Database.Database | null = null
@@ -539,6 +555,7 @@ export function searchMessages(q: ParsedQuery, opts: SearchOpts = {}): SearchHit
   params.limit = opts.limit ?? 100
   params.offset = opts.offset ?? 0
 
+  const dir = opts.orderBy === 'oldest' ? 'ASC' : 'DESC'
   const rows = d
     .prepare(
       `SELECT m.id, m.channel_id, m.guild_id, m.data,
@@ -548,7 +565,7 @@ export function searchMessages(q: ParsedQuery, opts: SearchOpts = {}): SearchHit
          FROM messages m
          LEFT JOIN message_triage t ON t.message_id = m.id
         WHERE ${where}
-        ORDER BY m.created_at DESC, m.id DESC
+        ORDER BY m.created_at ${dir}, m.id ${dir}
         LIMIT @limit OFFSET @offset`
     )
     .all(params) as {
@@ -600,6 +617,126 @@ export function setTriage(
       Date.now(),
       messageId
     )
+}
+
+// --- saved messages (FR-8) -------------------------------------------
+
+export interface BookmarkSnapshot {
+  row: MessageRow
+  ctx: {
+    guildId: string
+    guildName: string
+    channelName: string
+    threadName: string | null
+    isDm: boolean
+  }
+}
+
+export interface BookmarkRow {
+  messageId: string
+  channelId: string
+  savedAt: number
+  note: string | null
+  label: string | null
+  editedSince: boolean
+  deletedUpstream: boolean
+  snapshot: BookmarkSnapshot
+  latest: MessageRow | null
+}
+
+export function addBookmark(
+  messageId: string,
+  channelId: string,
+  snapshot: BookmarkSnapshot
+): void {
+  db()
+    .prepare(
+      `INSERT INTO bookmarks (message_id, channel_id, saved_at, snapshot)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(message_id) DO NOTHING`
+    )
+    .run(messageId, channelId, Date.now(), JSON.stringify(snapshot))
+}
+
+export function removeBookmark(messageId: string): void {
+  db().prepare('DELETE FROM bookmarks WHERE message_id = ?').run(messageId)
+}
+
+export function updateBookmark(
+  messageId: string,
+  patch: { note?: string | null; label?: string | null }
+): void {
+  const d = db()
+  if (patch.note !== undefined)
+    d.prepare('UPDATE bookmarks SET note = ? WHERE message_id = ?').run(patch.note, messageId)
+  if (patch.label !== undefined)
+    d.prepare('UPDATE bookmarks SET label = ? WHERE message_id = ?').run(patch.label, messageId)
+}
+
+/** Record that the upstream message changed; keep the old snapshot, stash the new. */
+export function markBookmarkEdited(messageId: string, latest: MessageRow): void {
+  db()
+    .prepare(
+      `UPDATE bookmarks SET edited_since = 1, latest = ? WHERE message_id = ? AND deleted_upstream = 0`
+    )
+    .run(JSON.stringify(latest), messageId)
+}
+
+export function markBookmarkDeleted(messageId: string): void {
+  db().prepare('UPDATE bookmarks SET deleted_upstream = 1 WHERE message_id = ?').run(messageId)
+}
+
+/** Promote the stashed latest content to the saved snapshot. */
+export function refreshBookmark(messageId: string): void {
+  const d = db()
+  const row = d
+    .prepare('SELECT snapshot, latest FROM bookmarks WHERE message_id = ?')
+    .get(messageId) as { snapshot: string; latest: string | null } | undefined
+  if (!row?.latest) return
+  const snap = JSON.parse(row.snapshot) as BookmarkSnapshot
+  snap.row = JSON.parse(row.latest) as MessageRow
+  d.prepare(
+    'UPDATE bookmarks SET snapshot = ?, latest = NULL, edited_since = 0 WHERE message_id = ?'
+  ).run(JSON.stringify(snap), messageId)
+}
+
+export function listBookmarks(): BookmarkRow[] {
+  return (
+    db()
+      .prepare(
+        `SELECT message_id, channel_id, saved_at, note, label, edited_since, deleted_upstream, snapshot, latest
+           FROM bookmarks ORDER BY saved_at DESC`
+      )
+      .all() as {
+      message_id: string
+      channel_id: string
+      saved_at: number
+      note: string | null
+      label: string | null
+      edited_since: number
+      deleted_upstream: number
+      snapshot: string
+      latest: string | null
+    }[]
+  ).map((r) => ({
+    messageId: r.message_id,
+    channelId: r.channel_id,
+    savedAt: r.saved_at,
+    note: r.note,
+    label: r.label,
+    editedSince: !!r.edited_since,
+    deletedUpstream: !!r.deleted_upstream,
+    snapshot: JSON.parse(r.snapshot) as BookmarkSnapshot,
+    latest: r.latest ? (JSON.parse(r.latest) as MessageRow) : null
+  }))
+}
+
+export function bookmarkIdSet(): Set<string> {
+  return new Set(
+    (db().prepare('SELECT message_id FROM bookmarks').all() as { message_id: string }[]).map(
+      (r) => r.message_id
+    )
+  )
 }
 
 /** Wipe every table — used on sign-out so the local cache really is cleared. */

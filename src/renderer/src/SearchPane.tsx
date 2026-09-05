@@ -16,7 +16,7 @@ export function SearchPane({
   selection,
   onOpen
 }: {
-  mode: 'search' | 'mentions'
+  mode: 'search' | 'mentions' | 'mine'
   guilds: { id: string; name: string }[]
   channelNames: Map<string, string>
   selection: Selection | null
@@ -28,6 +28,7 @@ export function SearchPane({
   const [includeEveryone, setIncludeEveryone] = useState(false)
   const [includeReplies, setIncludeReplies] = useState(false)
   const [showResolved, setShowResolved] = useState(false)
+  const [orderBy, setOrderBy] = useState<'newest' | 'oldest'>('newest')
   const [results, setResults] = useState<SearchResult[]>([])
   const [indexed, setIndexed] = useState(0)
   const [loading, setLoading] = useState(false)
@@ -38,6 +39,8 @@ export function SearchPane({
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const mentionsMode = mode === 'mentions'
+  const mineMode = mode === 'mine'
+  const backfillKind = mineMode ? 'mine' : 'mentions'
 
   const run = useMemo(
     () => (q: string): void => {
@@ -47,6 +50,8 @@ export function SearchPane({
         mentionsOnly: mentionsMode,
         includeEveryone: mentionsMode && includeEveryone,
         includeReplies: mentionsMode && includeReplies,
+        mineOnly: mineMode,
+        orderBy: mineMode ? orderBy : 'newest',
         limit: 200,
         offset: 0
       }
@@ -60,7 +65,7 @@ export function SearchPane({
         }
       })
     },
-    [scope, excludeMuted, mentionsMode, includeEveryone, includeReplies, showResolved]
+    [scope, excludeMuted, mentionsMode, mineMode, includeEveryone, includeReplies, showResolved, orderBy]
   )
 
   useEffect(() => {
@@ -73,19 +78,21 @@ export function SearchPane({
 
   useEffect(() => {
     return window.harmony.onBackfill((p) => {
+      if (p.kind !== backfillKind) return
       setBackfill({
         running: !p.done,
         label: p.done
-          ? `Indexed ${p.indexed.toLocaleString()} mentions.`
-          : `Syncing… server ${p.guild}/${p.guilds}, ${p.indexed.toLocaleString()} found`
+          ? `Indexed ${p.indexed.toLocaleString()} ${mineMode ? 'messages' : 'mentions'}.`
+          : `Syncing… ${p.guild}/${p.guilds}, ${p.indexed.toLocaleString()} found`
       })
       if (p.done) run(query.trim())
     })
-  }, [run, query])
+  }, [run, query, backfillKind, mineMode])
 
   const startBackfill = (): void => {
     setBackfill({ running: true, label: 'Starting…' })
-    void window.harmony.backfillMentions().then((res) => {
+    const call = mineMode ? window.harmony.backfillMyMessages() : window.harmony.backfillMentions()
+    void call.then((res) => {
       if (!res.ok) setBackfill({ running: false, label: res.error ?? 'Backfill failed.' })
     })
   }
@@ -115,6 +122,13 @@ export function SearchPane({
     channels: channelNames
   })
 
+  const placeholder = mineMode
+    ? 'Filter my messages —  in:#channel  has:link  before:2026-01-01'
+    : mentionsMode
+      ? 'Filter your mentions —  from:@name  in:#channel  has:link  before:2026-01-01'
+      : 'Search —  words, "a phrase", from:@name in:#channel has:image before:2026-01-01'
+  const syncLabel = mineMode ? 'Sync my messages' : 'Sync mentions'
+
   return (
     <div className="search-pane">
       <div className="search-head">
@@ -122,11 +136,7 @@ export function SearchPane({
           className="search-box"
           value={query}
           autoFocus
-          placeholder={
-            mentionsMode
-              ? 'Filter your mentions —  from:@name  in:#channel  has:link  before:2026-01-01'
-              : 'Search —  words, "a phrase", from:@name in:#channel has:image before:2026-01-01'
-          }
+          placeholder={placeholder}
           onChange={(e) => setQuery(e.target.value)}
         />
         <div className="search-filters">
@@ -150,6 +160,18 @@ export function SearchPane({
             />
             Exclude muted
           </label>
+          {mineMode && (
+            <label>
+              Sort
+              <select
+                value={orderBy}
+                onChange={(e) => setOrderBy(e.target.value as 'newest' | 'oldest')}
+              >
+                <option value="newest">Newest first</option>
+                <option value="oldest">Oldest first</option>
+              </select>
+            </label>
+          )}
           {mentionsMode && (
             <>
               <label>
@@ -176,14 +198,12 @@ export function SearchPane({
                 />
                 Show resolved
               </label>
-              <button
-                className="ghost sync-btn"
-                disabled={backfill.running}
-                onClick={startBackfill}
-              >
-                {backfill.running ? 'Syncing…' : 'Sync mentions'}
-              </button>
             </>
+          )}
+          {(mentionsMode || mineMode) && (
+            <button className="ghost sync-btn" disabled={backfill.running} onClick={startBackfill}>
+              {backfill.running ? 'Syncing…' : syncLabel}
+            </button>
           )}
         </div>
         {backfill.label && <div className="search-backfill">{backfill.label}</div>}
@@ -193,10 +213,10 @@ export function SearchPane({
         {loading && results.length === 0 && <div className="pane-note">Searching…</div>}
         {!loading && results.length === 0 && (
           <div className="pane-note dim">
-            {mentionsMode ? 'No mentions match.' : 'No matches.'}{' '}
+            {mineMode ? 'No messages match.' : mentionsMode ? 'No mentions match.' : 'No matches.'}{' '}
             {indexed === 0
               ? 'The index is empty — open a few channels to fill it' +
-                (mentionsMode ? ', or run a mentions backfill.' : '.')
+                (mentionsMode || mineMode ? `, or run a ${mineMode ? 'my-messages' : 'mentions'} backfill.` : '.')
               : `${indexed.toLocaleString()} messages indexed.`}
           </div>
         )}

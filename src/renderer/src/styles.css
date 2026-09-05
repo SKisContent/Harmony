@@ -1413,6 +1413,7 @@ h3.md-h {
 
 /* composer ------------------------------------------------------------- */
 .composer {
+  position: relative;
   flex: none;
   border-top: 1px solid var(--line);
   padding: 10px 18px 12px;
@@ -1669,4 +1670,265 @@ h3.md-h {
   margin-top: 6px;
   font-size: 11px;
   color: var(--text-dim);
+}
+
+/* saved messages (FR-8) ---------------------------------------------- */
+.sr-flag.warn {
+  color: var(--mention);
+}
+
+.saved-row.is-gone {
+  opacity: 0.72;
+}
+
+.saved-label {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: var(--bg-3);
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.saved-edit {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.saved-edit input {
+  flex: 1 1 140px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.saved-edit button {
+  padding: 3px 10px;
+  font-size: 11px;
+}
+
+.msg.saved {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.msg-toolbar button.on {
+  color: var(--accent);
+}
+
+kbd {
+  padding: 0 5px;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--bg-2);
+  font-family: inherit;
+  font-size: 11px;
+}
+
+/* composer autocomplete + pickers (XR-4) ------------------------------ */
+.composer-foot .ghost {
+  padding: 2px 7px;
+  font-size: 13px;
+}
+
+.composer-foot .ghost.on {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.ts-btn {
+  padding: 2px 6px;
+  font-size: 11px;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+
+.ts-item:hover .ts-btn {
+  opacity: 0.75;
+}
+
+.ts-btn:hover {
+  opacity: 1;
+}
+
+.notify-sel {
+  flex: none;
+  opacity: 0;
+  transition: opacity 0.1s;
+  font-size: 10px;
+  color: var(--text-muted);
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  max-width: 72px;
+}
+
+.chan:hover .notify-sel,
+.notify-sel:focus {
+  opacity: 1;
+}
+
+.suggest-pop {
+  position: absolute;
+  left: 18px;
+  right: 18px;
+  bottom: 100%;
+  margin-bottom: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+  z-index: 5;
+}
+
+.suggest-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.suggest-item.active,
+.suggest-item:hover {
+  background: var(--bg-3);
+}
+
+.suggest-icon {
+  flex: none;
+  width: 20px;
+  text-align: center;
+}
+
+.suggest-icon img {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+}
+
+.suggest-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.picker {
+  position: absolute;
+  right: 18px;
+  bottom: 100%;
+  margin-bottom: 6px;
+  width: 320px;
+  max-height: 340px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+  z-index: 5;
+}
+
+.picker-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+
+.picker-tabs button {
+  flex: 1;
+  background: transparent;
+  border: 0;
+  padding: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.picker-tabs button.on {
+  color: var(--text);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.picker-search {
+  flex: none;
+  margin: 8px;
+  padding: 6px 9px;
+  font-size: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--text);
+}
+
+.picker-grid {
+  flex: 1;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(40px, 1fr));
+  gap: 4px;
+  padding: 0 8px 8px;
+  align-content: start;
+}
+
+.picker-grid.gif {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.picker-grid button {
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  padding: 2px;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.picker-grid.gif button {
+  aspect-ratio: 16 / 9;
+}
+
+.picker-grid button:hover {
+  background: var(--bg-3);
+}
+
+.picker-grid img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.picker-grid.gif img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 4px;
+}
+
+.sticker-lottie {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.picker-empty {
+  grid-column: 1 / -1;
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 14px;
+  text-align: center;
 }

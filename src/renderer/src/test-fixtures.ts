@@ -28,6 +28,7 @@ export function channel(over: Partial<ChannelRow> = {}): ChannelRow {
     muted: false,
     pinned: false,
     pinSortKey: 0,
+    notifyLevel: 3,
     threads: [],
     ...over
   }
@@ -62,6 +63,7 @@ export function makeState(over: Partial<UnifiedState> = {}): UnifiedState {
         iconUrl: null,
         position: 0,
         muted: false,
+        notifyLevel: 0,
         categories: [
           category({
             id: 'cat1',
@@ -90,6 +92,7 @@ export function makeState(over: Partial<UnifiedState> = {}): UnifiedState {
     local: {
       hideEmptyCategories: true,
       emptyMode: 'no-visible',
+      bookmarks: [],
       pinnedChannels: [],
       pinnedThreads: [
         {

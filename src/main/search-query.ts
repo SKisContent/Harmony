@@ -9,7 +9,7 @@
 //   has:link|image|file|video|embed|code
 //   mentions:@user
 //   before:YYYY-MM-DD  after:YYYY-MM-DD  during:YYYY-MM
-//   is:unread|resolved|edited|mention|starred|snoozed
+//   is:unread|resolved|edited|mention|mine|starred|snoozed
 
 export interface ParsedQuery {
   /** FTS5 MATCH expression over the `content` column ('' when there is no text). */
@@ -25,7 +25,7 @@ export interface ParsedQuery {
 }
 
 const HAS = new Set(['link', 'image', 'file', 'video', 'embed', 'code'])
-const IS = new Set(['unread', 'resolved', 'edited', 'mention', 'starred', 'snoozed'])
+const IS = new Set(['unread', 'resolved', 'edited', 'mention', 'mine', 'starred', 'snoozed'])
 const OPERATORS = new Set(['from', 'in', 'thread', 'has', 'mentions', 'before', 'after', 'during', 'is'])
 
 interface Token {

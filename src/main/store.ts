@@ -3,17 +3,25 @@ import { join } from 'node:path'
 import { app } from 'electron'
 import { readSecure } from './secure-file'
 import {
+  type BookmarkSnapshot,
   type LocalState,
   type SearchHit,
   type SearchOpts,
+  addBookmark,
+  bookmarkIdSet,
   clearModel,
   deleteIndexedMessage,
   indexMessage,
   indexedMessageCount,
+  listBookmarks,
   loadLocalState,
   loadModel,
+  markBookmarkDeleted,
+  markBookmarkEdited,
   pinChannel,
   pinThread,
+  refreshBookmark,
+  removeBookmark,
   reorderPinnedCategories,
   reorderPinnedChannels,
   reorderPinnedThreads,
@@ -25,6 +33,7 @@ import {
   type StoreModel,
   unpinChannel,
   unpinThread,
+  updateBookmark,
   updateThreadPin
 } from './db'
 import { toRow } from './rest'
@@ -40,6 +49,7 @@ import {
   type PinnedChannelView,
   type PinnedThreadView,
   type PresenceStatus,
+  type SavedMessage,
   type SearchResult,
   type SearchScopeOpts,
   type ThreadRow,
@@ -112,7 +122,8 @@ interface ReadStateEntry {
 interface GuildSettings {
   guild_id: string | null
   muted?: boolean
-  channel_overrides?: { channel_id: string; muted?: boolean }[]
+  message_notifications?: number
+  channel_overrides?: { channel_id: string; muted?: boolean; message_notifications?: number }[]
 }
 
 const snapshotFilePath = () => join(app.getPath('userData'), 'snapshot.bin')
@@ -131,13 +142,20 @@ export class Store extends EventEmitter {
   private readStates = new Map<string, ReadStateEntry>()
   private mutedGuilds = new Set<string>()
   private mutedChannels = new Set<string>()
+  /** per-guild default notification level (0 all · 1 mentions · 2 nothing). */
+  private guildNotify = new Map<string, number>()
+  /** per-channel notification override (0 all · 1 mentions · 2 nothing · 3 inherit). */
+  private channelNotify = new Map<string, number>()
   private syncedAt: number | null = null
   private local: LocalState = { prefs: {}, pinnedThreads: [], pinnedChannels: [], categoryLayout: {} }
+  private bookmarkIds = new Set<string>()
+  private bookmarks: ReturnType<typeof listBookmarks> = []
 
   constructor() {
     super()
     this.loadFromDb()
     this.reloadLocal()
+    this.reloadBookmarks()
   }
 
   private reloadLocal(): void {
@@ -146,6 +164,80 @@ export class Store extends EventEmitter {
     } catch (e) {
       console.error('[store] local state load failed:', (e as Error).message)
     }
+  }
+
+  private reloadBookmarks(): void {
+    try {
+      this.bookmarks = listBookmarks()
+      this.bookmarkIds = bookmarkIdSet()
+    } catch (e) {
+      console.error('[store] bookmark load failed:', (e as Error).message)
+    }
+  }
+
+  // --- saved messages (FR-8) -------------------------------------------
+
+  addBookmark(row: MessageRow, channelId: string): void {
+    const ctx = this.channelContext(channelId)
+    const snapshot: BookmarkSnapshot = {
+      row,
+      ctx: {
+        guildId: ctx.guildId,
+        guildName: ctx.guildName,
+        channelName: ctx.channelName,
+        threadName: ctx.threadName,
+        isDm: ctx.isDm
+      }
+    }
+    addBookmark(row.id, channelId, snapshot)
+    this.reloadBookmarks()
+    this.emit('change')
+  }
+
+  removeBookmark(messageId: string): void {
+    removeBookmark(messageId)
+    this.reloadBookmarks()
+    this.emit('change')
+  }
+
+  updateBookmark(messageId: string, patch: { note?: string | null; label?: string | null }): void {
+    updateBookmark(messageId, patch)
+    this.reloadBookmarks()
+    this.emit('change')
+  }
+
+  refreshBookmark(messageId: string): void {
+    refreshBookmark(messageId)
+    this.reloadBookmarks()
+    this.emit('change')
+  }
+
+  private buildBookmarks(): SavedMessage[] {
+    return this.bookmarks.map((b) => {
+      // prefer a live breadcrumb, fall back to the one captured at save time
+      const live = this.channelContext(b.channelId)
+      const ctx = live.channelName === 'unknown' ? b.snapshot.ctx : live
+      const row = b.snapshot.row
+      return {
+        id: b.messageId,
+        channelId: b.channelId,
+        guildId: ctx.guildId,
+        guildName: ctx.guildName,
+        channelName: ctx.channelName,
+        threadName: ctx.threadName,
+        isDm: ctx.isDm,
+        authorId: row.authorId,
+        authorName: row.authorName,
+        content: row.content,
+        attachments: row.attachments,
+        timestamp: row.timestamp,
+        savedAt: b.savedAt,
+        note: b.note,
+        label: b.label,
+        editedSince: b.editedSince,
+        deletedUpstream: b.deletedUpstream
+      }
+    })
   }
 
   // --- Harmony-local layout mutations (FR-3 / FR-6 / FR-7) ---------------
@@ -237,6 +329,35 @@ export class Store extends EventEmitter {
     return [...this.guilds.keys()]
   }
 
+  dmChannelIds(): string[] {
+    return [...this.dmChannels.keys()]
+  }
+
+  /** Index a batch of `/search?author_id={me}` hits (FR-5 backfill). */
+  indexAuthoredHits(guildId: string | null, raws: unknown[]): number {
+    let n = 0
+    for (const m of raws as any[]) {
+      if (!m?.id || !m.channel_id) continue
+      try {
+        indexMessage(toRow(m), {
+          guildId: guildId ?? m.guild_id ?? null,
+          channelId: m.channel_id,
+          mentionsMe:
+            !!this.self &&
+            Array.isArray(m.mentions) &&
+            m.mentions.some((u: { id: string }) => u.id === this.self!.id),
+          mine: true,
+          everyone: !!m.mention_everyone,
+          replyToMe: !!this.self && m.referenced_message?.author?.id === this.self.id
+        })
+        n++
+      } catch {
+        /* best effort */
+      }
+    }
+    return n
+  }
+
   /** Index a batch of `/search?mentions={me}` hits (FR-4 backfill). */
   indexMentionHits(guildId: string, raws: unknown[]): number {
     let n = 0
@@ -289,6 +410,8 @@ export class Store extends EventEmitter {
       mentionsOnly: opts.mentionsOnly,
       includeEveryone: opts.includeEveryone,
       includeReplies: opts.includeReplies,
+      mineOnly: opts.mineOnly,
+      orderBy: opts.orderBy,
       limit: opts.limit,
       offset: opts.offset
     }
@@ -442,10 +565,18 @@ export class Store extends EventEmitter {
 
         this.mutedGuilds.clear()
         this.mutedChannels.clear()
+        this.guildNotify.clear()
+        this.channelNotify.clear()
         const ugs: GuildSettings[] = d.user_guild_settings?.entries ?? d.user_guild_settings ?? []
         for (const s of ugs) {
           if (s.muted && s.guild_id) this.mutedGuilds.add(s.guild_id)
-          for (const o of s.channel_overrides ?? []) if (o.muted) this.mutedChannels.add(o.channel_id)
+          if (typeof s.message_notifications === 'number' && s.guild_id)
+            this.guildNotify.set(s.guild_id, s.message_notifications)
+          for (const o of s.channel_overrides ?? []) {
+            if (o.muted) this.mutedChannels.add(o.channel_id)
+            if (typeof o.message_notifications === 'number')
+              this.channelNotify.set(o.channel_id, o.message_notifications)
+          }
         }
 
         this.syncedAt = Date.now()
@@ -576,6 +707,15 @@ export class Store extends EventEmitter {
               d.mentions.some((m: { id: string }) => m.id === this.self?.id)
             this.indexOne(d, mm)
           }
+          if (this.bookmarkIds.has(d.id) && d.timestamp && d.author) {
+            try {
+              markBookmarkEdited(d.id, toRow(d))
+              this.reloadBookmarks()
+              this.emit('change')
+            } catch {
+              /* best effort */
+            }
+          }
           this.emit('message', { kind: 'update', channelId: d.channel_id, message: toRow(d) })
         }
         break
@@ -586,6 +726,15 @@ export class Store extends EventEmitter {
             deleteIndexedMessage(d.id)
           } catch {
             /* index best-effort */
+          }
+          if (this.bookmarkIds.has(d.id)) {
+            try {
+              markBookmarkDeleted(d.id)
+              this.reloadBookmarks()
+              this.emit('change')
+            } catch {
+              /* best effort */
+            }
           }
           this.emit('message', { kind: 'delete', channelId: d.channel_id, id: d.id })
         }
@@ -636,10 +785,14 @@ export class Store extends EventEmitter {
         if (gid) {
           if (d.muted) this.mutedGuilds.add(gid)
           else this.mutedGuilds.delete(gid)
+          if (typeof d.message_notifications === 'number')
+            this.guildNotify.set(gid, d.message_notifications)
         }
         for (const o of d.channel_overrides ?? []) {
           if (o.muted) this.mutedChannels.add(o.channel_id)
           else this.mutedChannels.delete(o.channel_id)
+          if (typeof o.message_notifications === 'number')
+            this.channelNotify.set(o.channel_id, o.message_notifications)
         }
         this.persist()
         this.emit('change')
@@ -663,6 +816,36 @@ export class Store extends EventEmitter {
     if (muted) set.add(id)
     else set.delete(id)
     this.emit('change')
+  }
+
+  /** Optimistic per-channel notification-level change (XR-4). */
+  setChannelNotifyLevelLocal(channelId: string, level: number): void {
+    this.channelNotify.set(channelId, level)
+    this.emit('change')
+  }
+
+  /** Custom emoji + stickers for a guild, from the cached gateway payload (XR-4). */
+  guildAssets(guildId: string): {
+    emojis: { id: string; name: string; animated: boolean }[]
+    stickers: { id: string; name: string; description: string; format: number }[]
+  } {
+    const g = this.guilds.get(guildId) as
+      | (RawGuild & {
+          emojis?: { id: string | null; name: string; animated?: boolean }[]
+          stickers?: { id: string; name: string; description?: string; format_type?: number }[]
+        })
+      | undefined
+    return {
+      emojis: (g?.emojis ?? [])
+        .filter((e) => !!e.id && !!e.name)
+        .map((e) => ({ id: e.id as string, name: e.name, animated: !!e.animated })),
+      stickers: (g?.stickers ?? []).map((s) => ({
+        id: s.id,
+        name: s.name,
+        description: s.description ?? '',
+        format: s.format_type ?? 1
+      }))
+    }
   }
 
   private upsertGuild(g: RawGuild): void {
@@ -754,6 +937,7 @@ export class Store extends EventEmitter {
           muted: this.mutedGuilds.has(g.id) || this.mutedChannels.has(c.id),
           pinned: !!pin,
           pinSortKey: pin?.sortKey ?? 0,
+          notifyLevel: this.channelNotify.get(c.id) ?? 3,
           threads: threadsByParent.get(c.id) ?? []
         }
         const key = c.parent_id && categoryNames.has(c.parent_id) ? c.parent_id : ''
@@ -830,6 +1014,7 @@ export class Store extends EventEmitter {
         iconUrl: icon ? `https://cdn.discordapp.com/icons/${g.id}/${icon}.png?size=64` : null,
         position: 0,
         muted: this.mutedGuilds.has(g.id),
+        notifyLevel: this.guildNotify.get(g.id) ?? 0,
         categories
       })
     }
@@ -855,7 +1040,8 @@ export class Store extends EventEmitter {
         hideEmptyCategories,
         emptyMode,
         pinnedThreads: this.buildPinnedThreads(),
-        pinnedChannels: this.buildPinnedChannels()
+        pinnedChannels: this.buildPinnedChannels(),
+        bookmarks: this.buildBookmarks()
       }
     }
   }

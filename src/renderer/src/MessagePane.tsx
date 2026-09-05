@@ -1,8 +1,17 @@
 import { type ReactElement, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { MessageRow, ThreadSummary, UploadedAttachment } from '@shared/types'
+import type {
+  GuildEmoji,
+  GuildSticker,
+  MessageRow,
+  ThreadSummary,
+  UploadedAttachment
+} from '@shared/types'
 import type { Selection } from './App'
 import { type MdContext, renderContent } from './markdown'
 import { type EmojiRef, applyReactionDelta, cdnEmoji } from './reactions'
+import { Picker } from './Picker'
+import { EMOJI, searchEmoji } from './emoji-data'
+import { type ActiveToken, activeToken, applySuggestion, rankByName } from './composer-suggest'
 
 const IMG = /\.(png|jpe?g|gif|webp|avif)$/i
 const PAGE = 50
@@ -61,12 +70,14 @@ export function MessagePane({
   selection,
   channelNames,
   pinnedThreadIds,
+  savedIds,
   selfId,
   onOpen
 }: {
   selection: Selection | null
   channelNames: Map<string, string>
   pinnedThreadIds: Set<string>
+  savedIds: Set<string>
   selfId: string
   onOpen: (sel: Selection) => void
 }): ReactElement {
@@ -94,6 +105,13 @@ export function MessagePane({
   const [typers, setTypers] = useState<Map<string, { name: string; expiry: number }>>(new Map())
   const [pending, setPending] = useState<PendingFile[]>([])
   const [dragOver, setDragOver] = useState(false)
+  const hoverIdRef = useRef<string | null>(null)
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [assets, setAssets] = useState<{ emojis: GuildEmoji[]; stickers: GuildSticker[] }>({
+    emojis: [],
+    stickers: []
+  })
+  const [suggest, setSuggest] = useState<{ token: ActiveToken; index: number } | null>(null)
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -147,6 +165,8 @@ export function MessagePane({
     setQuickFor(null)
     setTypers(new Map())
     setPending([])
+    setPickerOpen(false)
+    setSuggest(null)
 
     if (!selection.isThread && !selection.isDm) {
       window.harmony.getThreads(selection.channelId).then((res) => {
@@ -157,6 +177,22 @@ export function MessagePane({
       cancelled = true
     }
   }, [selection?.channelId, selection?.isThread, selection?.isDm])
+
+  // custom emoji + stickers for the current server (XR-4 pickers / `:` autocomplete)
+  useEffect(() => {
+    const gid = selection?.guildId
+    if (!gid) {
+      setAssets({ emojis: [], stickers: [] })
+      return
+    }
+    let cancelled = false
+    void window.harmony.getGuildAssets(gid).then((res) => {
+      if (!cancelled && res.ok) setAssets({ emojis: res.emojis ?? [], stickers: res.stickers ?? [] })
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [selection?.guildId])
 
   // live create / update / delete / reaction for the open channel
   useEffect(() => {
@@ -277,37 +313,43 @@ export function MessagePane({
     })
   }
 
-  const send = async (): Promise<void> => {
+  const send = async (override?: { content?: string; stickerIds?: string[] }): Promise<void> => {
     if (!selection || sending) return
-    const text = draft.trim()
-    if (!text && pending.length === 0) return
+    const text = (override?.content ?? draft).trim()
+    const stickerIds = override?.stickerIds
+    if (!text && pending.length === 0 && !stickerIds?.length) return
     setSending(true)
     setSendError(null)
     try {
       let refs: UploadedAttachment[] = []
-      for (const p of pending) {
-        const up = await window.harmony.uploadAttachment(selection.channelId, {
-          name: p.name,
-          type: p.type,
-          bytes: p.bytes
-        })
-        if (!up.ok || !up.ref) throw new Error(up.error ?? 'Attachment upload failed.')
-        refs.push(up.ref)
+      if (!override) {
+        for (const p of pending) {
+          const up = await window.harmony.uploadAttachment(selection.channelId, {
+            name: p.name,
+            type: p.type,
+            bytes: p.bytes
+          })
+          if (!up.ok || !up.ref) throw new Error(up.error ?? 'Attachment upload failed.')
+          refs.push(up.ref)
+        }
+        refs = refs.map((r, i) => ({ ...r, id: String(i) }))
       }
-      refs = refs.map((r, i) => ({ ...r, id: String(i) }))
       const res = await window.harmony.sendMessage(selection.channelId, text, {
-        ...(replyTo ? { replyToId: replyTo.id, pingReply } : {}),
-        ...(refs.length ? { attachments: refs } : {})
+        ...(replyTo && !override ? { replyToId: replyTo.id, pingReply } : {}),
+        ...(refs.length ? { attachments: refs } : {}),
+        ...(stickerIds?.length ? { stickerIds } : {})
       })
       if (res.ok && res.message) {
         atBottomRef.current = true
         setMessages((prev) =>
           prev.some((m) => m.id === res.message!.id) ? prev : [...prev, res.message!]
         )
-        setDraft('')
-        setReplyTo(null)
-        pending.forEach((p) => p.previewUrl && URL.revokeObjectURL(p.previewUrl))
-        setPending([])
+        if (!override) {
+          setDraft('')
+          setReplyTo(null)
+          pending.forEach((p) => p.previewUrl && URL.revokeObjectURL(p.previewUrl))
+          setPending([])
+        }
       } else setSendError(res.error ?? 'Failed to send.')
     } catch (e) {
       setSendError((e as Error).message)
@@ -316,13 +358,103 @@ export function MessagePane({
     }
   }
 
+  const refreshSuggest = (value: string, caret: number): void => {
+    const tok = activeToken(value, caret)
+    setSuggest(tok ? { token: tok, index: 0 } : null)
+  }
+
   const onComposerInput = (v: string): void => {
     setDraft(v)
+    refreshSuggest(v, inputRef.current?.selectionStart ?? v.length)
     const now = Date.now()
     if (v && selection && now - lastTypedRef.current > 8000) {
       lastTypedRef.current = now
       void window.harmony.startTyping(selection.channelId)
     }
+  }
+
+  // --- `@` / `#` / `:` autocomplete (XR-4) ---
+  const people = useMemo(() => {
+    const seen = new Map<string, string>()
+    for (const m of messages) {
+      if (m.authorId && !seen.has(m.authorId)) seen.set(m.authorId, m.authorName)
+      for (const u of m.mentions) if (!seen.has(u.id)) seen.set(u.id, u.name)
+    }
+    return [...seen].map(([id, name]) => ({ id, name }))
+  }, [messages])
+
+  const channelList = useMemo(
+    () => [...channelNames].map(([id, name]) => ({ id, name })),
+    [channelNames]
+  )
+
+  interface SuggestItem {
+    key: string
+    label: string
+    insert: string
+    imgUrl?: string
+    glyph?: string
+  }
+  const suggestItems: SuggestItem[] = useMemo(() => {
+    if (!suggest) return []
+    const q = suggest.token.query
+    if (suggest.token.kind === '@')
+      return rankByName(people, q).map((p) => ({
+        key: p.id,
+        label: p.name,
+        insert: `<@${p.id}>`,
+        glyph: '@'
+      }))
+    if (suggest.token.kind === '#')
+      return rankByName(channelList, q).map((c) => ({
+        key: c.id,
+        label: c.name,
+        insert: `<#${c.id}>`,
+        glyph: '#'
+      }))
+    // `:` emoji — custom first, then unicode
+    const ql = q.toLowerCase()
+    const custom = assets.emojis
+      .filter((e) => e.name.toLowerCase().includes(ql))
+      .slice(0, 6)
+      .map((e) => ({
+        key: e.id,
+        label: `:${e.name}:`,
+        insert: `<${e.animated ? 'a' : ''}:${e.name}:${e.id}>`,
+        imgUrl: `https://cdn.discordapp.com/emojis/${e.id}.${e.animated ? 'gif' : 'png'}?size=44`
+      }))
+    const uni = (q ? searchEmoji(q, 8) : EMOJI.slice(0, 8)).map((it) => ({
+      key: it.n,
+      label: `:${it.n}:`,
+      insert: it.e,
+      glyph: it.e
+    }))
+    return [...custom, ...uni].slice(0, 10)
+  }, [suggest, people, channelList, assets.emojis])
+
+  const applyPick = (item: SuggestItem): void => {
+    if (!suggest) return
+    const { value, caret } = applySuggestion(draft, suggest.token, item.insert)
+    setDraft(value)
+    setSuggest(null)
+    const el = inputRef.current
+    if (el)
+      requestAnimationFrame(() => {
+        el.focus()
+        el.setSelectionRange(caret, caret)
+      })
+  }
+
+  const insertEmoji = (text: string): void => {
+    const el = inputRef.current
+    const at = el?.selectionStart ?? draft.length
+    const next = draft.slice(0, at) + text + draft.slice(el?.selectionEnd ?? at)
+    setDraft(next)
+    if (el)
+      requestAnimationFrame(() => {
+        el.focus()
+        el.setSelectionRange(at + text.length, at + text.length)
+      })
   }
 
   const saveEdit = async (): Promise<void> => {
@@ -359,6 +491,30 @@ export function MessagePane({
         )
     })
   }
+
+  const toggleBookmark = (m: MessageRow): void => {
+    if (!selection) return
+    if (savedIds.has(m.id)) void window.harmony.removeBookmark(m.id)
+    else void window.harmony.addBookmark(m, selection.channelId)
+  }
+
+  // FR-8: `s` on the hovered message saves / unsaves it
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 's' || e.metaKey || e.ctrlKey || e.altKey) return
+      const el = document.activeElement
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) return
+      const id = hoverIdRef.current
+      if (!id) return
+      const m = messages.find((x) => x.id === id)
+      if (m) {
+        e.preventDefault()
+        toggleBookmark(m)
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [messages, savedIds, selection?.channelId])
 
   const scheduleWho = (m: MessageRow, key: string): void => {
     if (whoTimer.current) clearTimeout(whoTimer.current)
@@ -401,6 +557,26 @@ export function MessagePane({
           ? `${typerNames[0]} and ${typerNames[1]} are typing…`
           : 'Several people are typing…'
 
+  const renameThreadPrompt = (t: ThreadSummary): void => {
+    const name = window.prompt('Rename thread', t.name)?.trim()
+    if (!name || name === t.name) return
+    void window.harmony.renameThread(t.id, name).then((res) => {
+      if (res.ok) setThreads((prev) => prev.map((x) => (x.id === t.id ? { ...x, name } : x)))
+    })
+  }
+
+  const toggleThreadArchived = (t: ThreadSummary): void => {
+    void window.harmony.setThreadArchived(t.id, !t.archived).then((res) => {
+      if (res.ok) setThreads((prev) => prev.map((x) => (x.id === t.id ? { ...x, archived: !t.archived } : x)))
+    })
+  }
+
+  const doLeaveThread = (t: ThreadSummary): void => {
+    void window.harmony.leaveThread(t.id).then((res) => {
+      if (res.ok) setThreads((prev) => prev.filter((x) => x.id !== t.id))
+    })
+  }
+
   const renderThreadRow = (t: ThreadSummary): ReactElement => {
     const pinned = pinnedThreadIds.has(t.id)
     return (
@@ -434,6 +610,36 @@ export function MessagePane({
           }}
         >
           📌
+        </button>
+        <button
+          className="ghost ts-btn"
+          title="Rename thread"
+          onClick={(e) => {
+            e.stopPropagation()
+            renameThreadPrompt(t)
+          }}
+        >
+          ✎
+        </button>
+        <button
+          className="ghost ts-btn"
+          title={t.archived ? 'Unarchive thread' : 'Archive thread'}
+          onClick={(e) => {
+            e.stopPropagation()
+            toggleThreadArchived(t)
+          }}
+        >
+          {t.archived ? '📤' : '📥'}
+        </button>
+        <button
+          className="ghost ts-btn"
+          title="Leave thread"
+          onClick={(e) => {
+            e.stopPropagation()
+            doLeaveThread(t)
+          }}
+        >
+          🚪
         </button>
         <span className="ts-count">{t.messageCount}</span>
       </div>
@@ -504,9 +710,16 @@ export function MessagePane({
               return (
                 <div
                   className={
-                    'msg' + (grouped ? ' grouped' : '') + (replyTo?.id === m.id ? ' replying' : '')
+                    'msg' +
+                    (grouped ? ' grouped' : '') +
+                    (replyTo?.id === m.id ? ' replying' : '') +
+                    (savedIds.has(m.id) ? ' saved' : '')
                   }
                   key={m.id}
+                  onMouseEnter={() => (hoverIdRef.current = m.id)}
+                  onMouseLeave={() => {
+                    if (hoverIdRef.current === m.id) hoverIdRef.current = null
+                  }}
                 >
                   <div className="msg-toolbar">
                     <button
@@ -517,6 +730,13 @@ export function MessagePane({
                     </button>
                     <button title="Reply" onClick={() => startReply(m)}>
                       ↩
+                    </button>
+                    <button
+                      className={savedIds.has(m.id) ? 'on' : ''}
+                      title={savedIds.has(m.id) ? 'Remove from Saved' : 'Save message (s)'}
+                      onClick={() => toggleBookmark(m)}
+                    >
+                      🔖
                     </button>
                     {own(m) && (
                       <button
@@ -699,6 +919,45 @@ export function MessagePane({
                 ))}
               </div>
             )}
+            {suggest && suggestItems.length > 0 && (
+              <div className="suggest-pop">
+                {suggestItems.map((it, i) => (
+                  <div
+                    key={it.key}
+                    className={'suggest-item' + (i === suggest.index ? ' active' : '')}
+                    onMouseEnter={() => setSuggest((s) => (s ? { ...s, index: i } : s))}
+                    onMouseDown={(e) => {
+                      e.preventDefault()
+                      applyPick(it)
+                    }}
+                  >
+                    {it.imgUrl ? (
+                      <img className="suggest-icon" src={it.imgUrl} alt="" />
+                    ) : (
+                      <span className="suggest-icon">{it.glyph}</span>
+                    )}
+                    <span className="suggest-label">{it.label}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {pickerOpen && (
+              <Picker
+                guildId={selection.guildId}
+                emojis={assets.emojis}
+                stickers={assets.stickers}
+                onEmoji={(text) => insertEmoji(text)}
+                onGif={(url) => {
+                  setPickerOpen(false)
+                  void send({ content: url })
+                }}
+                onSticker={(id) => {
+                  setPickerOpen(false)
+                  void send({ stickerIds: [id] })
+                }}
+                onClose={() => setPickerOpen(false)}
+              />
+            )}
             <textarea
               ref={inputRef}
               value={draft}
@@ -710,6 +969,12 @@ export function MessagePane({
               rows={1}
               disabled={sending}
               onChange={(e) => onComposerInput(e.target.value)}
+              onSelect={(e) => refreshSuggest(draft, e.currentTarget.selectionStart)}
+              onClick={(e) => refreshSuggest(draft, e.currentTarget.selectionStart)}
+              onKeyUp={(e) => {
+                if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return
+                refreshSuggest(draft, e.currentTarget.selectionStart)
+              }}
               onPaste={(e) => {
                 const files = [...e.clipboardData.items]
                   .filter((it) => it.kind === 'file')
@@ -721,6 +986,30 @@ export function MessagePane({
                 }
               }}
               onKeyDown={(e) => {
+                if (suggest && suggestItems.length > 0) {
+                  if (e.key === 'ArrowDown') {
+                    e.preventDefault()
+                    setSuggest((s) => (s ? { ...s, index: (s.index + 1) % suggestItems.length } : s))
+                    return
+                  }
+                  if (e.key === 'ArrowUp') {
+                    e.preventDefault()
+                    setSuggest((s) =>
+                      s ? { ...s, index: (s.index - 1 + suggestItems.length) % suggestItems.length } : s
+                    )
+                    return
+                  }
+                  if (e.key === 'Tab' || e.key === 'Enter') {
+                    e.preventDefault()
+                    applyPick(suggestItems[suggest.index])
+                    return
+                  }
+                  if (e.key === 'Escape') {
+                    e.preventDefault()
+                    setSuggest(null)
+                    return
+                  }
+                }
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault()
                   void send()
@@ -743,6 +1032,13 @@ export function MessagePane({
                   }}
                 />
               </label>
+              <button
+                className={'ghost' + (pickerOpen ? ' on' : '')}
+                title="Emoji, GIFs & stickers"
+                onClick={() => setPickerOpen((v) => !v)}
+              >
+                😀
+              </button>
               <span className={draft.length > 2000 ? 'over' : ''}>{draft.length}/2000</span>
               <button
                 disabled={sending || (!draft.trim() && pending.length === 0) || draft.length > 2000}

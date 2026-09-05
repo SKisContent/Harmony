@@ -2,6 +2,7 @@ import { type ReactElement, useEffect, useMemo, useState } from 'react'
 import type { CategoryGroup, MessageRow, UnifiedState } from '@shared/types'
 import { MessagePane } from './MessagePane'
 import { SearchPane } from './SearchPane'
+import { SavedPane } from './SavedPane'
 import { LogoAvatar } from './LogoAvatar'
 
 const STATUS_LABEL: Record<string, string> = {
@@ -106,7 +107,7 @@ export function App(): ReactElement {
   const [hideMuted, setHideMuted] = usePersistedState<boolean>('hideMuted', true)
   const [catSort, setCatSort] = usePersistedState<CatSort>('catSort', 'alpha')
   const [mode, setMode] = usePersistedState<
-    'servers' | 'dms' | 'pinned' | 'mentions' | 'search'
+    'servers' | 'dms' | 'pinned' | 'mentions' | 'mine' | 'saved' | 'search'
   >('mode', 'servers')
   const [selection, setSelection] = useState<Selection | null>(null)
   const [revealed, toggleRevealed] = usePersistedSet('revealedGuilds')
@@ -185,6 +186,10 @@ export function App(): ReactElement {
   const connected = state?.status === 'ready' || (state?.guilds.length ?? 0) > 0
   const pinnedThreadIds = useMemo(
     () => new Set((state?.local.pinnedThreads ?? []).map((p) => p.id)),
+    [state]
+  )
+  const savedIds = useMemo(
+    () => new Set((state?.local.bookmarks ?? []).map((b) => b.id)),
     [state]
   )
 
@@ -312,6 +317,21 @@ export function App(): ReactElement {
               >
                 Mentions
                 {state && state.counts.mentions > 0 ? <span className="seg-dot" /> : null}
+              </button>
+              <button
+                className={mode === 'mine' ? 'seg on' : 'seg'}
+                onClick={() => setMode('mine')}
+              >
+                My Messages
+              </button>
+              <button
+                className={mode === 'saved' ? 'seg on' : 'seg'}
+                onClick={() => setMode('saved')}
+              >
+                Saved
+                {state && state.local.bookmarks.some((b) => b.editedSince || b.deletedUpstream) ? (
+                  <span className="seg-dot" />
+                ) : null}
               </button>
               <button
                 className={mode === 'search' ? 'seg on' : 'seg'}
@@ -605,6 +625,24 @@ export function App(): ReactElement {
                                   >
                                     {c.muted ? '🔕' : '🔔'}
                                   </button>
+                                  <select
+                                    className="notify-sel"
+                                    title="Notification level"
+                                    value={c.notifyLevel}
+                                    onClick={(e) => e.stopPropagation()}
+                                    onChange={(e) => {
+                                      e.stopPropagation()
+                                      void window.harmony.setChannelNotifyLevel(
+                                        { guildId: g.id, channelId: c.id },
+                                        Number(e.target.value) as 0 | 1 | 2 | 3
+                                      )
+                                    }}
+                                  >
+                                    <option value={3}>Default</option>
+                                    <option value={0}>All</option>
+                                    <option value={1}>Mentions</option>
+                                    <option value={2}>Nothing</option>
+                                  </select>
                                   {c.mentionCount > 0 ? (
                                     <span className="badge">{c.mentionCount}</span>
                                   ) : c.unread ? (
@@ -834,10 +872,20 @@ export function App(): ReactElement {
           </aside>
 
           <main className="content">
-            {mode === 'search' || mode === 'mentions' ? (
+            {mode === 'search' || mode === 'mentions' || mode === 'mine' ? (
               <SearchPane
                 mode={mode}
                 guilds={(state?.guilds ?? []).map((g) => ({ id: g.id, name: g.name }))}
+                channelNames={channelNames}
+                selection={selection}
+                onOpen={(sel) => {
+                  setSelection(sel)
+                  setMode('servers')
+                }}
+              />
+            ) : mode === 'saved' ? (
+              <SavedPane
+                bookmarks={state?.local.bookmarks ?? []}
                 channelNames={channelNames}
                 selection={selection}
                 onOpen={(sel) => {
@@ -850,6 +898,7 @@ export function App(): ReactElement {
                 selection={selection}
                 channelNames={channelNames}
                 pinnedThreadIds={pinnedThreadIds}
+                savedIds={savedIds}
                 selfId={state?.self?.id ?? ''}
                 onOpen={setSelection}
               />
