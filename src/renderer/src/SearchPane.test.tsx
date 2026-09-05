@@ -62,10 +62,14 @@ describe('SearchPane', () => {
     const user = userEvent.setup()
     const { search } = mount('search', [result()])
     await user.type(screen.getByRole('textbox'), 'release')
-    expect(await screen.findByText(/ship the release notes/)).toBeInTheDocument()
+    // the component also fires a debounced search on mount (with an empty query);
+    // wait for the specific post-typing call rather than for any content to appear,
+    // since the mock resolves the same canned result regardless of the query.
+    await vi.waitFor(() => expect(search.mock.calls.at(-1)?.[0]).toBe('release'))
     const [q, opts] = search.mock.calls.at(-1) as [string, { scope: string; mentionsOnly: boolean }]
     expect(q).toBe('release')
     expect(opts).toMatchObject({ scope: 'all', mentionsOnly: false })
+    expect(await screen.findByText(/ship the release notes/)).toBeInTheDocument()
   })
 
   it('mentions mode sends mentionsOnly and hides resolved by default', async () => {

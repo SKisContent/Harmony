@@ -190,6 +190,60 @@ describe('FR-7 — pin / collapse / reorder categories', () => {
   })
 })
 
+describe('guild collapse / expand', () => {
+  it('collapses a server to hide its categories, channels and threads, then expands it back', async () => {
+    const user = userEvent.setup()
+    mountApp()
+
+    expect(await screen.findByText('general')).toBeInTheDocument()
+    expect(screen.getByText('standup')).toBeInTheDocument()
+
+    await user.click(screen.getByText('Acme', { selector: '.g-name' }))
+    expect(screen.queryByText('General')).not.toBeInTheDocument()
+    expect(screen.queryByText('general')).not.toBeInTheDocument()
+    expect(screen.queryByText('standup')).not.toBeInTheDocument()
+    // the guild header itself stays put so it can be expanded again
+    expect(screen.getByText('Acme', { selector: '.g-name' })).toBeInTheDocument()
+
+    await user.click(screen.getByText('Acme', { selector: '.g-name' }))
+    expect(screen.getByText('general')).toBeInTheDocument()
+    expect(screen.getByText('standup')).toBeInTheDocument()
+  })
+
+  it('remembers a category’s own collapsed state across a guild collapse/expand cycle', async () => {
+    const user = userEvent.setup()
+    const { push } = mountApp()
+
+    expect(await screen.findByText('general')).toBeInTheDocument()
+    // collapse just the "General" category first
+    await user.click(screen.getByText('General'))
+    const next = makeState()
+    next.guilds[0].categories[0].collapsed = true
+    push(next)
+    expect(screen.queryByText('general')).not.toBeInTheDocument()
+    expect(screen.getByText('General')).toBeInTheDocument()
+
+    // now collapse and re-expand the whole server
+    await user.click(screen.getByText('Acme', { selector: '.g-name' }))
+    expect(screen.queryByText('General')).not.toBeInTheDocument()
+    await user.click(screen.getByText('Acme', { selector: '.g-name' }))
+
+    // "General" is visible again, but still collapsed — its channel stays hidden
+    expect(screen.getByText('General')).toBeInTheDocument()
+    expect(screen.queryByText('general')).not.toBeInTheDocument()
+  })
+
+  it('does not toggle collapse when muting the server', async () => {
+    const user = userEvent.setup()
+    const { harmony } = mountApp()
+
+    const head = (await screen.findByText('Acme', { selector: '.g-name' })).closest('.guild-head')!
+    await user.click(within(head as HTMLElement).getByTitle('Mute server'))
+    expect(harmony.setMuted).toHaveBeenCalledWith({ guildId: 'g1' }, true)
+    expect(screen.getByText('general')).toBeInTheDocument()
+  })
+})
+
 describe('mute / unmute', () => {
   it('mutes a channel with the right target', async () => {
     const user = userEvent.setup()

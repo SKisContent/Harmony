@@ -111,6 +111,7 @@ export function App(): ReactElement {
   >('mode', 'servers')
   const [selection, setSelection] = useState<Selection | null>(null)
   const [revealed, toggleRevealed] = usePersistedSet('revealedGuilds')
+  const [guildCollapsed, toggleGuildCollapsed] = usePersistedSet('collapsedGuilds')
 
   useEffect(() => {
     window.harmony.getState().then(setState)
@@ -494,15 +495,28 @@ export function App(): ReactElement {
                 const pinnedIds = g.cats.filter((c) => c.pinned && c.id).map((c) => c.id as string)
                 return (
                   <section className="guild" key={g.id}>
-                    <div className={'guild-head' + (g.muted ? ' is-muted' : '')}>
+                    <div
+                      className={'guild-head' + (g.muted ? ' is-muted' : '')}
+                      tabIndex={0}
+                      title={guildCollapsed.has(g.id) ? 'Expand server' : 'Collapse server'}
+                      onClick={() => toggleGuildCollapsed(g.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          toggleGuildCollapsed(g.id)
+                        }
+                      }}
+                    >
+                      <span className="chev">{guildCollapsed.has(g.id) ? '▸' : '▾'}</span>
                       {g.iconUrl && <img src={g.iconUrl} alt="" />}
                       <span className="g-name">{g.name}</span>
                       <button
                         className={'mute-btn' + (g.muted ? ' on' : '')}
                         title={g.muted ? 'Unmute server' : 'Mute server'}
-                        onClick={() =>
+                        onClick={(e) => {
+                          e.stopPropagation()
                           void window.harmony.setMuted({ guildId: g.id }, !g.muted)
-                        }
+                        }}
                       >
                         {g.muted ? '🔕' : '🔔'}
                       </button>
@@ -512,7 +526,7 @@ export function App(): ReactElement {
                       </span>
                     </div>
 
-                    {g.cats.map((cat) => {
+                    {!guildCollapsed.has(g.id) && g.cats.map((cat) => {
                       if (cat.hide && !g.isRevealed) return null
                       const key = cat.id ?? '__none__'
                       const pinIdx = cat.id ? pinnedIds.indexOf(cat.id) : -1
@@ -693,7 +707,7 @@ export function App(): ReactElement {
                       )
                     })}
 
-                    {g.hiddenCount > 0 && (
+                    {!guildCollapsed.has(g.id) && g.hiddenCount > 0 && (
                       <button className="cat-hidden-toggle" onClick={() => toggleRevealed(g.id)}>
                         {g.isRevealed
                           ? 'Hide empty categories'
