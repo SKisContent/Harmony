@@ -3,24 +3,41 @@ import { join } from 'node:path'
 import { app } from 'electron'
 import { readSecure } from './secure-file'
 import {
+  type BookmarkSnapshot,
   type LocalState,
+  type SearchHit,
+  type SearchOpts,
+  addBookmark,
+  bookmarkIdSet,
   clearModel,
+  deleteIndexedMessage,
+  indexMessage,
+  indexedMessageCount,
+  listBookmarks,
   loadLocalState,
   loadModel,
+  markBookmarkDeleted,
+  markBookmarkEdited,
   pinChannel,
   pinThread,
+  refreshBookmark,
+  removeBookmark,
   reorderPinnedCategories,
   reorderPinnedChannels,
   reorderPinnedThreads,
   saveModel,
+  searchMessages,
   setCategoryLayout,
   setPref,
+  setTriage,
   type StoreModel,
   unpinChannel,
   unpinThread,
+  updateBookmark,
   updateThreadPin
 } from './db'
 import { toRow } from './rest'
+import { parseQuery } from './search-query'
 import {
   type CategoryGroup,
   type ChannelRow,
@@ -28,9 +45,13 @@ import {
   type DmMemberRow,
   type DmRow,
   type GuildGroup,
+  type MessageRow,
   type PinnedChannelView,
   type PinnedThreadView,
   type PresenceStatus,
+  type SavedMessage,
+  type SearchResult,
+  type SearchScopeOpts,
   type ThreadRow,
   type UnifiedState,
   CHANNEL_TYPE,
@@ -101,7 +122,8 @@ interface ReadStateEntry {
 interface GuildSettings {
   guild_id: string | null
   muted?: boolean
-  channel_overrides?: { channel_id: string; muted?: boolean }[]
+  message_notifications?: number
+  channel_overrides?: { channel_id: string; muted?: boolean; message_notifications?: number }[]
 }
 
 const snapshotFilePath = () => join(app.getPath('userData'), 'snapshot.bin')
@@ -120,13 +142,20 @@ export class Store extends EventEmitter {
   private readStates = new Map<string, ReadStateEntry>()
   private mutedGuilds = new Set<string>()
   private mutedChannels = new Set<string>()
+  /** per-guild default notification level (0 all · 1 mentions · 2 nothing). */
+  private guildNotify = new Map<string, number>()
+  /** per-channel notification override (0 all · 1 mentions · 2 nothing · 3 inherit). */
+  private channelNotify = new Map<string, number>()
   private syncedAt: number | null = null
   private local: LocalState = { prefs: {}, pinnedThreads: [], pinnedChannels: [], categoryLayout: {} }
+  private bookmarkIds = new Set<string>()
+  private bookmarks: ReturnType<typeof listBookmarks> = []
 
   constructor() {
     super()
     this.loadFromDb()
     this.reloadLocal()
+    this.reloadBookmarks()
   }
 
   private reloadLocal(): void {
@@ -135,6 +164,80 @@ export class Store extends EventEmitter {
     } catch (e) {
       console.error('[store] local state load failed:', (e as Error).message)
     }
+  }
+
+  private reloadBookmarks(): void {
+    try {
+      this.bookmarks = listBookmarks()
+      this.bookmarkIds = bookmarkIdSet()
+    } catch (e) {
+      console.error('[store] bookmark load failed:', (e as Error).message)
+    }
+  }
+
+  // --- saved messages (FR-8) -------------------------------------------
+
+  addBookmark(row: MessageRow, channelId: string): void {
+    const ctx = this.channelContext(channelId)
+    const snapshot: BookmarkSnapshot = {
+      row,
+      ctx: {
+        guildId: ctx.guildId,
+        guildName: ctx.guildName,
+        channelName: ctx.channelName,
+        threadName: ctx.threadName,
+        isDm: ctx.isDm
+      }
+    }
+    addBookmark(row.id, channelId, snapshot)
+    this.reloadBookmarks()
+    this.emit('change')
+  }
+
+  removeBookmark(messageId: string): void {
+    removeBookmark(messageId)
+    this.reloadBookmarks()
+    this.emit('change')
+  }
+
+  updateBookmark(messageId: string, patch: { note?: string | null; label?: string | null }): void {
+    updateBookmark(messageId, patch)
+    this.reloadBookmarks()
+    this.emit('change')
+  }
+
+  refreshBookmark(messageId: string): void {
+    refreshBookmark(messageId)
+    this.reloadBookmarks()
+    this.emit('change')
+  }
+
+  private buildBookmarks(): SavedMessage[] {
+    return this.bookmarks.map((b) => {
+      // prefer a live breadcrumb, fall back to the one captured at save time
+      const live = this.channelContext(b.channelId)
+      const ctx = live.channelName === 'unknown' ? b.snapshot.ctx : live
+      const row = b.snapshot.row
+      return {
+        id: b.messageId,
+        channelId: b.channelId,
+        guildId: ctx.guildId,
+        guildName: ctx.guildName,
+        channelName: ctx.channelName,
+        threadName: ctx.threadName,
+        isDm: ctx.isDm,
+        authorId: row.authorId,
+        authorName: row.authorName,
+        content: row.content,
+        attachments: row.attachments,
+        timestamp: row.timestamp,
+        savedAt: b.savedAt,
+        note: b.note,
+        label: b.label,
+        editedSince: b.editedSince,
+        deletedUpstream: b.deletedUpstream
+      }
+    })
   }
 
   // --- Harmony-local layout mutations (FR-3 / FR-6 / FR-7) ---------------
@@ -175,6 +278,233 @@ export class Store extends EventEmitter {
     reorderPinnedChannels(ids)
     this.reloadLocal()
     this.emit('change')
+  }
+
+  // --- message index + search (XR-3 / FR-4) -----------------------------
+
+  private indexOne(d: any, mentionsMe: boolean): void {
+    try {
+      indexMessage(toRow(d), {
+        guildId: d.guild_id ?? null,
+        channelId: d.channel_id,
+        mentionsMe,
+        mine: !!this.self && d.author?.id === this.self.id,
+        everyone: !!d.mention_everyone,
+        replyToMe: !!this.self && d.referenced_message?.author?.id === this.self.id
+      })
+    } catch (e) {
+      console.error('[store] index failed:', (e as Error).message)
+    }
+  }
+
+  /** Cache-on-read: index a page of messages fetched for a channel view. */
+  indexFetched(channelId: string, rows: MessageRow[]): void {
+    const guildId = this.channelContext(channelId).guildId || null
+    for (const row of rows) {
+      try {
+        indexMessage(row, {
+          guildId,
+          channelId,
+          mentionsMe: !!this.self && row.mentions.some((u) => u.id === this.self!.id),
+          mine: !!this.self && row.authorId === this.self.id
+        })
+      } catch {
+        /* best effort */
+      }
+    }
+  }
+
+  setMessageTriage(
+    messageId: string,
+    patch: { resolved?: boolean; starred?: boolean; snoozeUntil?: number | null }
+  ): void {
+    setTriage(messageId, patch)
+  }
+
+  selfId(): string {
+    return this.self?.id ?? ''
+  }
+
+  guildIds(): string[] {
+    return [...this.guilds.keys()]
+  }
+
+  dmChannelIds(): string[] {
+    return [...this.dmChannels.keys()]
+  }
+
+  /** Index a batch of `/search?author_id={me}` hits (FR-5 backfill). */
+  indexAuthoredHits(guildId: string | null, raws: unknown[]): number {
+    let n = 0
+    for (const m of raws as any[]) {
+      if (!m?.id || !m.channel_id) continue
+      try {
+        indexMessage(toRow(m), {
+          guildId: guildId ?? m.guild_id ?? null,
+          channelId: m.channel_id,
+          mentionsMe:
+            !!this.self &&
+            Array.isArray(m.mentions) &&
+            m.mentions.some((u: { id: string }) => u.id === this.self!.id),
+          mine: true,
+          everyone: !!m.mention_everyone,
+          replyToMe: !!this.self && m.referenced_message?.author?.id === this.self.id
+        })
+        n++
+      } catch {
+        /* best effort */
+      }
+    }
+    return n
+  }
+
+  /** Index a batch of `/search?mentions={me}` hits (FR-4 backfill). */
+  indexMentionHits(guildId: string, raws: unknown[]): number {
+    let n = 0
+    for (const m of raws as any[]) {
+      if (!m?.id || !m.channel_id) continue
+      try {
+        indexMessage(toRow(m), {
+          guildId,
+          channelId: m.channel_id,
+          mentionsMe: true,
+          mine: !!this.self && m.author?.id === this.self.id,
+          everyone: !!m.mention_everyone,
+          replyToMe: !!this.self && m.referenced_message?.author?.id === this.self.id
+        })
+        n++
+      } catch {
+        /* best effort */
+      }
+    }
+    return n
+  }
+
+  search(queryString: string, opts: SearchScopeOpts): { results: SearchResult[]; indexed: number } {
+    const q = parseQuery(queryString)
+
+    let channelIds: string[] | null = null
+    const wanted = [...q.in, ...q.thread]
+    if (wanted.length) {
+      const frags = wanted.map((f) => f.toLowerCase())
+      const set = new Set<string>()
+      for (const g of this.guilds.values()) {
+        const gname = (g.properties?.name ?? g.name ?? '').toLowerCase()
+        const guildMatch = frags.some((f) => gname.includes(f))
+        for (const c of g.channels ?? []) {
+          if (!c.name || c.type === CATEGORY_TYPE) continue
+          if (guildMatch || frags.some((f) => c.name!.toLowerCase().includes(f))) set.add(c.id)
+        }
+      }
+      for (const t of this.threads.values())
+        if (t.name && frags.some((f) => t.name!.toLowerCase().includes(f))) set.add(t.id)
+      for (const dm of this.dmChannels.values())
+        if (frags.some((f) => this.dmDisplayName(dm).toLowerCase().includes(f))) set.add(dm.id)
+      channelIds = [...set]
+    }
+
+    const searchOpts: SearchOpts = {
+      channelIds,
+      guildId: opts.scope === 'all' ? null : opts.scope === 'dm' ? 'dm' : opts.scope,
+      excludeChannelIds: opts.excludeMuted ? this.mutedChannelIdSet() : [],
+      mentionsOnly: opts.mentionsOnly,
+      includeEveryone: opts.includeEveryone,
+      includeReplies: opts.includeReplies,
+      mineOnly: opts.mineOnly,
+      orderBy: opts.orderBy,
+      limit: opts.limit,
+      offset: opts.offset
+    }
+
+    let hits = searchMessages(q, searchOpts)
+
+    if (q.mentions.length) {
+      const frags = q.mentions.map((f) => f.toLowerCase())
+      hits = hits.filter((h) =>
+        h.row.mentions.some((u) => frags.some((f) => u.name.toLowerCase().includes(f)))
+      )
+    }
+    if (q.is.includes('unread')) hits = hits.filter((h) => this.hitUnread(h.channelId, h.id))
+
+    return { results: hits.map((h) => this.decorateHit(h)), indexed: indexedMessageCount() }
+  }
+
+  private hitUnread(channelId: string, messageId: string): boolean {
+    const rs = this.readStates.get(channelId)
+    if (!rs?.last_message_id || !/^\d+$/.test(messageId)) return true
+    return BigInt(messageId) > BigInt(rs.last_message_id)
+  }
+
+  private mutedChannelIdSet(): string[] {
+    const set = new Set(this.mutedChannels)
+    for (const gid of this.mutedGuilds)
+      for (const c of this.guilds.get(gid)?.channels ?? []) set.add(c.id)
+    return [...set]
+  }
+
+  private dmDisplayName(c: RawDm): string {
+    const ids = c.recipient_ids ?? c.recipients?.map((r) => r.id) ?? []
+    if (c.type === 3) return c.name?.trim() || ids.map((id) => this.userName(id)).join(', ') || 'Group DM'
+    return ids[0] ? this.userName(ids[0]) : 'Direct Message'
+  }
+
+  private channelContext(channelId: string): {
+    guildId: string
+    guildName: string
+    channelName: string
+    threadName: string | null
+    isDm: boolean
+  } {
+    const dm = this.dmChannels.get(channelId)
+    if (dm)
+      return {
+        guildId: '',
+        guildName: 'Direct Messages',
+        channelName: this.dmDisplayName(dm),
+        threadName: null,
+        isDm: true
+      }
+    const th = this.threads.get(channelId)
+    if (th) {
+      const g = th.guild_id ? this.guilds.get(th.guild_id) : undefined
+      const parent = g?.channels?.find((c) => c.id === th.parent_id)
+      return {
+        guildId: th.guild_id ?? '',
+        guildName: g?.properties?.name ?? g?.name ?? '',
+        channelName: parent?.name ?? 'channel',
+        threadName: th.name ?? 'thread',
+        isDm: false
+      }
+    }
+    for (const g of this.guilds.values()) {
+      const c = g.channels?.find((x) => x.id === channelId)
+      if (c)
+        return {
+          guildId: g.id,
+          guildName: g.properties?.name ?? g.name ?? '',
+          channelName: c.name ?? 'channel',
+          threadName: null,
+          isDm: false
+        }
+    }
+    return { guildId: '', guildName: '', channelName: 'unknown', threadName: null, isDm: false }
+  }
+
+  private decorateHit(h: SearchHit): SearchResult {
+    const ctx = this.channelContext(h.channelId)
+    return {
+      ...h.row,
+      channelId: h.channelId,
+      guildId: ctx.guildId,
+      guildName: ctx.guildName,
+      channelName: ctx.channelName,
+      threadName: ctx.threadName,
+      isDm: ctx.isDm,
+      unread: this.hitUnread(h.channelId, h.id),
+      resolved: h.resolved,
+      starred: h.starred,
+      snoozeUntil: h.snoozeUntil
+    }
   }
 
   setCategoryLayout(
@@ -235,10 +565,18 @@ export class Store extends EventEmitter {
 
         this.mutedGuilds.clear()
         this.mutedChannels.clear()
+        this.guildNotify.clear()
+        this.channelNotify.clear()
         const ugs: GuildSettings[] = d.user_guild_settings?.entries ?? d.user_guild_settings ?? []
         for (const s of ugs) {
           if (s.muted && s.guild_id) this.mutedGuilds.add(s.guild_id)
-          for (const o of s.channel_overrides ?? []) if (o.muted) this.mutedChannels.add(o.channel_id)
+          if (typeof s.message_notifications === 'number' && s.guild_id)
+            this.guildNotify.set(s.guild_id, s.message_notifications)
+          for (const o of s.channel_overrides ?? []) {
+            if (o.muted) this.mutedChannels.add(o.channel_id)
+            if (typeof o.message_notifications === 'number')
+              this.channelNotify.set(o.channel_id, o.message_notifications)
+          }
         }
 
         this.syncedAt = Date.now()
@@ -355,6 +693,7 @@ export class Store extends EventEmitter {
           rsEntry.mention_count = (rsEntry.mention_count ?? 0) + 1
           this.readStates.set(d.channel_id, rsEntry)
         }
+        this.indexOne(d, mentionsMe)
         this.emit('message', { kind: 'create', channelId: d.channel_id, message: toRow(d) })
         this.emit('change')
         break
@@ -362,12 +701,41 @@ export class Store extends EventEmitter {
 
       case 'MESSAGE_UPDATE': {
         if (d.id && d.channel_id) {
+          if (d.timestamp && d.author) {
+            const mm =
+              Array.isArray(d.mentions) &&
+              d.mentions.some((m: { id: string }) => m.id === this.self?.id)
+            this.indexOne(d, mm)
+          }
+          if (this.bookmarkIds.has(d.id) && d.timestamp && d.author) {
+            try {
+              markBookmarkEdited(d.id, toRow(d))
+              this.reloadBookmarks()
+              this.emit('change')
+            } catch {
+              /* best effort */
+            }
+          }
           this.emit('message', { kind: 'update', channelId: d.channel_id, message: toRow(d) })
         }
         break
       }
       case 'MESSAGE_DELETE': {
         if (d.id && d.channel_id) {
+          try {
+            deleteIndexedMessage(d.id)
+          } catch {
+            /* index best-effort */
+          }
+          if (this.bookmarkIds.has(d.id)) {
+            try {
+              markBookmarkDeleted(d.id)
+              this.reloadBookmarks()
+              this.emit('change')
+            } catch {
+              /* best effort */
+            }
+          }
           this.emit('message', { kind: 'delete', channelId: d.channel_id, id: d.id })
         }
         break
@@ -417,10 +785,14 @@ export class Store extends EventEmitter {
         if (gid) {
           if (d.muted) this.mutedGuilds.add(gid)
           else this.mutedGuilds.delete(gid)
+          if (typeof d.message_notifications === 'number')
+            this.guildNotify.set(gid, d.message_notifications)
         }
         for (const o of d.channel_overrides ?? []) {
           if (o.muted) this.mutedChannels.add(o.channel_id)
           else this.mutedChannels.delete(o.channel_id)
+          if (typeof o.message_notifications === 'number')
+            this.channelNotify.set(o.channel_id, o.message_notifications)
         }
         this.persist()
         this.emit('change')
@@ -444,6 +816,36 @@ export class Store extends EventEmitter {
     if (muted) set.add(id)
     else set.delete(id)
     this.emit('change')
+  }
+
+  /** Optimistic per-channel notification-level change (XR-4). */
+  setChannelNotifyLevelLocal(channelId: string, level: number): void {
+    this.channelNotify.set(channelId, level)
+    this.emit('change')
+  }
+
+  /** Custom emoji + stickers for a guild, from the cached gateway payload (XR-4). */
+  guildAssets(guildId: string): {
+    emojis: { id: string; name: string; animated: boolean }[]
+    stickers: { id: string; name: string; description: string; format: number }[]
+  } {
+    const g = this.guilds.get(guildId) as
+      | (RawGuild & {
+          emojis?: { id: string | null; name: string; animated?: boolean }[]
+          stickers?: { id: string; name: string; description?: string; format_type?: number }[]
+        })
+      | undefined
+    return {
+      emojis: (g?.emojis ?? [])
+        .filter((e) => !!e.id && !!e.name)
+        .map((e) => ({ id: e.id as string, name: e.name, animated: !!e.animated })),
+      stickers: (g?.stickers ?? []).map((s) => ({
+        id: s.id,
+        name: s.name,
+        description: s.description ?? '',
+        format: s.format_type ?? 1
+      }))
+    }
   }
 
   private upsertGuild(g: RawGuild): void {
@@ -535,6 +937,7 @@ export class Store extends EventEmitter {
           muted: this.mutedGuilds.has(g.id) || this.mutedChannels.has(c.id),
           pinned: !!pin,
           pinSortKey: pin?.sortKey ?? 0,
+          notifyLevel: this.channelNotify.get(c.id) ?? 3,
           threads: threadsByParent.get(c.id) ?? []
         }
         const key = c.parent_id && categoryNames.has(c.parent_id) ? c.parent_id : ''
@@ -611,6 +1014,7 @@ export class Store extends EventEmitter {
         iconUrl: icon ? `https://cdn.discordapp.com/icons/${g.id}/${icon}.png?size=64` : null,
         position: 0,
         muted: this.mutedGuilds.has(g.id),
+        notifyLevel: this.guildNotify.get(g.id) ?? 0,
         categories
       })
     }
@@ -636,7 +1040,8 @@ export class Store extends EventEmitter {
         hideEmptyCategories,
         emptyMode,
         pinnedThreads: this.buildPinnedThreads(),
-        pinnedChannels: this.buildPinnedChannels()
+        pinnedChannels: this.buildPinnedChannels(),
+        bookmarks: this.buildBookmarks()
       }
     }
   }

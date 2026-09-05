@@ -34,6 +34,7 @@ function mount(opts: {
   messages?: MessageRow[]
   threads?: ThreadSummary[]
   pinned?: Set<string>
+  saved?: Set<string>
   selfId?: string
 }) {
   let onMsg: ((e: LiveMessage) => void) | null = null
@@ -51,6 +52,14 @@ function mount(opts: {
     startTyping: vi.fn().mockResolvedValue(undefined),
     uploadAttachment: vi.fn().mockResolvedValue({ ok: true, ref: { id: '0', filename: 'x', uploaded_filename: 'u' } }),
     pinThread: vi.fn().mockResolvedValue(undefined),
+    addBookmark: vi.fn().mockResolvedValue({ ok: true }),
+    removeBookmark: vi.fn().mockResolvedValue(undefined),
+    getGuildAssets: vi.fn().mockResolvedValue({ ok: true, emojis: [], stickers: [] }),
+    searchGifs: vi.fn().mockResolvedValue({ ok: true, gifs: [] }),
+    renameThread: vi.fn().mockResolvedValue({ ok: true }),
+    setThreadArchived: vi.fn().mockResolvedValue({ ok: true }),
+    leaveThread: vi.fn().mockResolvedValue({ ok: true }),
+    setChannelNotifyLevel: vi.fn().mockResolvedValue({ ok: true }),
     onMessage: vi.fn((cb: (e: LiveMessage) => void) => {
       onMsg = cb
       return () => {}
@@ -66,6 +75,7 @@ function mount(opts: {
       selection={selection}
       channelNames={new Map()}
       pinnedThreadIds={opts.pinned ?? new Set()}
+      savedIds={opts.saved ?? new Set()}
       selfId={opts.selfId ?? 'u1'}
       onOpen={vi.fn()}
     />

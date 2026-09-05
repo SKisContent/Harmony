@@ -1,7 +1,6 @@
 import { join } from 'node:path'
 import { BrowserWindow, app, ipcMain, shell } from 'electron'
-import type { UnifiedState } from '@shared/types'
-import type { UploadedAttachment } from '@shared/types'
+import type { MessageRow, SearchScopeOpts, UnifiedState, UploadedAttachment } from '@shared/types'
 import { captureTokenViaLogin, clearToken, loadToken, saveToken } from './auth'
 import { Gateway } from './gateway'
 import {
@@ -12,12 +11,21 @@ import {
   getMessages,
   getReactionUsers,
   getThreads,
+  leaveThread,
   removeReaction,
+  renameThread,
+  searchChannelAuthored,
+  searchGifs,
+  searchGuildAuthored,
+  searchGuildMentions,
   sendMessage,
+  setChannelNotifications,
   setMuted,
+  setThreadArchived,
   startTyping,
   uploadAttachment
 } from './rest'
+import { nextSweep } from './backfill-plan'
 import { Store } from './store'
 
 let win: BrowserWindow | null = null
@@ -124,11 +132,138 @@ ipcMain.handle('harmony:getMessages', async (_e, channelId: string, before?: str
   if (!token) return { ok: false, error: 'Not signed in.' }
   try {
     const messages = await getMessages(channelId, token, 50, before)
+    store.indexFetched(channelId, messages)
     return { ok: true, messages }
   } catch (e) {
     return { ok: false, error: (e as Error).message }
   }
 })
+
+ipcMain.handle('harmony:search', (_e, query: string, opts: SearchScopeOpts) => {
+  try {
+    return { ok: true, ...store.search(query ?? '', opts) }
+  } catch (e) {
+    return { ok: false, error: (e as Error).message }
+  }
+})
+
+ipcMain.handle(
+  'harmony:setMessageTriage',
+  (_e, messageId: string, patch: { resolved?: boolean; starred?: boolean; snoozeUntil?: number | null }) => {
+    store.setMessageTriage(messageId, patch ?? {})
+  }
+)
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+let backfillRunning = false
+
+interface BackfillSource {
+  /** guild id, or a DM channel id */
+  id: string
+  fetchPage: (offset: number, maxId?: string) => ReturnType<typeof searchGuildMentions>
+  index: (raws: unknown[]) => number
+}
+
+/** Shared paging loop for the FR-4 (mentions) and FR-5 (my-messages) backfills. */
+async function runBackfill(
+  kind: 'mentions' | 'mine',
+  sources: BackfillSource[]
+): Promise<{ indexed: number }> {
+  let indexed = 0
+  for (let si = 0; si < sources.length; si++) {
+    const src = sources[si]
+    let state = { offset: 0, maxId: null as string | null }
+    const seen = new Set<string>()
+    let guardPages = 0
+
+    while (guardPages++ < 2000) {
+      let page
+      try {
+        page = await src.fetchPage(state.offset, state.maxId ?? undefined)
+      } catch (e) {
+        if (/Rate limited/.test((e as Error).message)) {
+          await sleep(2500)
+          continue
+        }
+        break // no access / other error — move to the next source
+      }
+      if (page.indexing) {
+        await sleep(3000)
+        continue
+      }
+      const fresh = page.hits.filter((m) => !seen.has(m.id))
+      for (const m of fresh) seen.add(m.id)
+      indexed += src.index(fresh)
+      win?.webContents.send('harmony:backfill', {
+        kind,
+        guild: si + 1,
+        guilds: sources.length,
+        indexed,
+        done: false
+      })
+
+      const oldestId = page.hits.length ? page.hits[page.hits.length - 1].id : null
+      const next = nextSweep(state, { count: page.hits.length, oldestId })
+      if (next === 'done') break
+      state = next
+      await sleep(600)
+    }
+  }
+
+  win?.webContents.send('harmony:backfill', {
+    kind,
+    guild: sources.length,
+    guilds: sources.length,
+    indexed,
+    done: true
+  })
+  return { indexed }
+}
+
+function runOne(
+  kind: 'mentions' | 'mine',
+  build: (token: string, self: string) => BackfillSource[]
+): Promise<{ ok: boolean; indexed?: number; error?: string }> {
+  if (backfillRunning) return Promise.resolve({ ok: false, error: 'A backfill is already running.' })
+  const token = currentToken ?? loadToken()
+  if (!token) return Promise.resolve({ ok: false, error: 'Not signed in.' })
+  const self = store.selfId()
+  if (!self) return Promise.resolve({ ok: false, error: 'Not signed in.' })
+  backfillRunning = true
+  return runBackfill(kind, build(token, self))
+    .then((r) => ({ ok: true, ...r }))
+    .catch((e) => ({ ok: false, error: (e as Error).message }))
+    .finally(() => {
+      backfillRunning = false
+    })
+}
+
+ipcMain.handle('harmony:backfillMentions', () =>
+  runOne('mentions', (token, self) =>
+    store.guildIds().map((gid) => ({
+      id: gid,
+      fetchPage: (offset, maxId) => searchGuildMentions(gid, self, token, offset, maxId),
+      index: (raws) => store.indexMentionHits(gid, raws)
+    }))
+  )
+)
+
+ipcMain.handle('harmony:backfillMyMessages', () =>
+  runOne('mine', (token, self) => [
+    ...store.guildIds().map((gid) => ({
+      id: gid,
+      fetchPage: (offset: number, maxId?: string) =>
+        searchGuildAuthored(gid, self, token, offset, maxId),
+      index: (raws: unknown[]) => store.indexAuthoredHits(gid, raws)
+    })),
+    ...store.dmChannelIds().map((cid) => ({
+      id: cid,
+      fetchPage: (offset: number, maxId?: string) =>
+        searchChannelAuthored(cid, self, token, offset, maxId),
+      index: (raws: unknown[]) => store.indexAuthoredHits(null, raws)
+    }))
+  ])
+)
 
 ipcMain.handle('harmony:getThreads', async (_e, channelId: string) => {
   const token = currentToken ?? loadToken()
@@ -143,18 +278,69 @@ ipcMain.handle('harmony:getThreads', async (_e, channelId: string) => {
   }
 })
 
+// --- XR-4 pickers + thread lifecycle + notification level ---
+ipcMain.handle('harmony:getGuildAssets', (_e, guildId: string) => {
+  try {
+    return { ok: true, ...store.guildAssets(guildId) }
+  } catch (e) {
+    return { ok: false, error: (e as Error).message }
+  }
+})
+
+ipcMain.handle('harmony:searchGifs', (_e, query: string) =>
+  withToken(async (t) => ({ ok: true, gifs: await searchGifs(query ?? '', t) }))
+)
+
+ipcMain.handle('harmony:renameThread', (_e, ch: string, name: string) =>
+  withToken(async (t) => {
+    await renameThread(ch, (name ?? '').trim().slice(0, 100), t)
+    return { ok: true }
+  })
+)
+
+ipcMain.handle('harmony:setThreadArchived', (_e, ch: string, archived: boolean) =>
+  withToken(async (t) => {
+    await setThreadArchived(ch, archived, t)
+    return { ok: true }
+  })
+)
+
+ipcMain.handle('harmony:leaveThread', (_e, ch: string) =>
+  withToken(async (t) => {
+    await leaveThread(ch, t)
+    return { ok: true }
+  })
+)
+
+ipcMain.handle(
+  'harmony:setChannelNotifyLevel',
+  (_e, target: { guildId?: string; channelId: string }, level: 0 | 1 | 2 | 3) => {
+    store.setChannelNotifyLevelLocal(target.channelId, level)
+    return withToken(async (t) => {
+      await setChannelNotifications(target.guildId ?? '@me', target.channelId, level, t)
+      return { ok: true }
+    })
+  }
+)
+
 ipcMain.handle(
   'harmony:sendMessage',
   async (
     _e,
     channelId: string,
     content: string,
-    opts?: { replyToId?: string; pingReply?: boolean; attachments?: UploadedAttachment[] }
+    opts?: {
+      replyToId?: string
+      pingReply?: boolean
+      attachments?: UploadedAttachment[]
+      stickerIds?: string[]
+    }
   ) => {
     const token = currentToken ?? loadToken()
     if (!token) return { ok: false, error: 'Not signed in.' }
     const text = (content ?? '').trim()
-    if (!text && !opts?.attachments?.length) return { ok: false, error: 'Message is empty.' }
+    if (!text && !opts?.attachments?.length && !opts?.stickerIds?.length)
+      return { ok: false, error: 'Message is empty.' }
     if (text.length > 2000) return { ok: false, error: 'Message is over 2000 characters.' }
     try {
       const message = await sendMessage(channelId, text, token, opts ?? {})
@@ -219,6 +405,25 @@ ipcMain.handle(
   'harmony:uploadAttachment',
   (_e, ch: string, file: { name: string; type: string; bytes: Uint8Array }) =>
     withToken(async (t) => ({ ok: true, ref: await uploadAttachment(ch, file, t) }))
+)
+
+// --- Saved messages (FR-8) ---
+ipcMain.handle('harmony:addBookmark', (_e, message: MessageRow, channelId: string) => {
+  try {
+    store.addBookmark(message, channelId)
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: (e as Error).message }
+  }
+})
+ipcMain.handle('harmony:removeBookmark', (_e, messageId: string) => store.removeBookmark(messageId))
+ipcMain.handle(
+  'harmony:updateBookmark',
+  (_e, messageId: string, patch: { note?: string | null; label?: string | null }) =>
+    store.updateBookmark(messageId, patch ?? {})
+)
+ipcMain.handle('harmony:refreshBookmark', (_e, messageId: string) =>
+  store.refreshBookmark(messageId)
 )
 
 // --- Harmony-local layout (FR-3 / FR-6 / FR-7) ---

@@ -95,14 +95,20 @@ export interface RawMessage {
   timestamp?: string
   edited_timestamp?: string | null
   channel_id?: string
+  guild_id?: string
   author?: { id: string; username?: string; global_name?: string | null }
   member?: { nick?: string | null }
   mentions?: { id: string; username?: string; global_name?: string | null }[]
+  mention_everyone?: boolean
   attachments?: { filename: string; url: string; size: number }[]
   embeds?: unknown[]
   type?: number
   reactions?: { emoji: RawEmoji; count: number; me: boolean }[]
-  referenced_message?: { author?: { global_name?: string | null; username?: string } } | null
+  referenced_message?: {
+    author?: { id?: string; global_name?: string | null; username?: string }
+  } | null
+  /** set on the matching message within a /search context group */
+  hit?: boolean
 }
 
 /** The token Discord's reaction endpoints want in the URL. */
@@ -157,6 +163,7 @@ export interface SendOptions {
   replyToId?: string
   pingReply?: boolean
   attachments?: UploadedAttachment[]
+  stickerIds?: string[]
 }
 
 export async function sendMessage(
@@ -175,8 +182,76 @@ export async function sendMessage(
     payload.allowed_mentions = { parse: ['users', 'roles', 'everyone'], replied_user: opts.pingReply !== false }
   }
   if (opts.attachments?.length) payload.attachments = opts.attachments
+  if (opts.stickerIds?.length) payload.sticker_ids = opts.stickerIds
   const created = await apiPost<RawMessage>(`/channels/${channelId}/messages`, token, payload)
   return toRow(created)
+}
+
+export interface GifResult {
+  /** the URL Discord's own picker sends as message content (auto-embeds) */
+  url: string
+  /** a still or short-loop preview for the grid */
+  preview: string
+  width: number
+  height: number
+}
+
+interface RawGif {
+  url: string
+  src: string
+  gif_src?: string
+  width: number
+  height: number
+}
+
+/** Trending GIFs (empty query) or a Tenor search, via Discord's own proxy. */
+export async function searchGifs(query: string, token: string): Promise<GifResult[]> {
+  const q = query.trim()
+  const path = q
+    ? `/gifs/search?${new URLSearchParams({ q, media_format: 'mp4', provider: 'tenor', limit: '30' })}`
+    : `/gifs/trending?${new URLSearchParams({ media_format: 'mp4', provider: 'tenor', limit: '30' })}`
+  const raw = await apiGet<RawGif[] | { gifs: RawGif[] }>(path, token)
+  const list = Array.isArray(raw) ? raw : (raw.gifs ?? [])
+  return list.map((g) => ({
+    url: g.url,
+    preview: g.gif_src || g.src || g.url,
+    width: g.width || 0,
+    height: g.height || 0
+  }))
+}
+
+/** Rename a thread (or channel). */
+export function renameThread(channelId: string, name: string, token: string): Promise<unknown> {
+  return apiPatch(`/channels/${channelId}`, token, { name })
+}
+
+/** Archive / unarchive a thread. */
+export function setThreadArchived(
+  channelId: string,
+  archived: boolean,
+  token: string
+): Promise<unknown> {
+  return apiPatch(`/channels/${channelId}`, token, { archived, locked: false })
+}
+
+/** Leave a thread. */
+export function leaveThread(channelId: string, token: string): Promise<void> {
+  return apiDelete(`/channels/${channelId}/thread-members/@me`, token)
+}
+
+/**
+ * Per-channel notification level (XR-4): 0 all messages · 1 only @mentions ·
+ * 2 nothing · 3 inherit the server default. `guildId` is `@me` for a DM.
+ */
+export function setChannelNotifications(
+  guildId: string,
+  channelId: string,
+  level: 0 | 1 | 2 | 3,
+  token: string
+): Promise<unknown> {
+  return apiPatch(`/users/@me/guilds/${guildId}/settings`, token, {
+    channel_overrides: { [channelId]: { message_notifications: level } }
+  })
 }
 
 export async function editMessage(
@@ -233,6 +308,60 @@ export async function getReactionUsers(
 
 export function ackMessage(channelId: string, messageId: string, token: string): Promise<void> {
   return apiPost(`/channels/${channelId}/messages/${messageId}/ack`, token, { token: null })
+}
+
+export interface MentionSearchPage {
+  hits: RawMessage[]
+  total: number
+  /** Discord is still building this guild's search index — retry with backoff. */
+  indexing: boolean
+}
+
+async function runSearch(path: string, filter: Record<string, string>, token: string, offset: number, maxId?: string): Promise<MentionSearchPage> {
+  const q = new URLSearchParams({ ...filter, sort_by: 'timestamp', sort_order: 'desc', offset: String(offset) })
+  if (maxId) q.set('max_id', maxId)
+  const res = await apiGet<{
+    messages?: RawMessage[][]
+    total_results?: number
+    doing_deep_historical_index?: boolean
+  }>(`${path}?${q}`, token)
+  const hits = (res.messages ?? [])
+    .map((group) => group.find((m) => m.hit) ?? group[0])
+    .filter((m): m is RawMessage => !!m)
+  return { hits, total: res.total_results ?? 0, indexing: !!res.doing_deep_historical_index }
+}
+
+/** One page of `/guilds/{id}/messages/search?mentions={me}` (docs §11.4). */
+export function searchGuildMentions(
+  guildId: string,
+  self: string,
+  token: string,
+  offset: number,
+  maxId?: string
+): Promise<MentionSearchPage> {
+  return runSearch(`/guilds/${guildId}/messages/search`, { mentions: self }, token, offset, maxId)
+}
+
+/** One page of `/guilds/{id}/messages/search?author_id={me}` (FR-5, docs §11.4). */
+export function searchGuildAuthored(
+  guildId: string,
+  self: string,
+  token: string,
+  offset: number,
+  maxId?: string
+): Promise<MentionSearchPage> {
+  return runSearch(`/guilds/${guildId}/messages/search`, { author_id: self }, token, offset, maxId)
+}
+
+/** One page of a DM/group-DM search for my own messages (FR-5). */
+export function searchChannelAuthored(
+  channelId: string,
+  self: string,
+  token: string,
+  offset: number,
+  maxId?: string
+): Promise<MentionSearchPage> {
+  return runSearch(`/channels/${channelId}/messages/search`, { author_id: self }, token, offset, maxId)
 }
 
 export function startTyping(channelId: string, token: string): Promise<void> {

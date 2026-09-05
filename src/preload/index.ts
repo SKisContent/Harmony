@@ -1,7 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
+  BackfillProgress,
   HarmonyApi,
   LiveMessage,
+  MessageRow,
+  SearchScopeOpts,
   TypingEvent,
   UnifiedState,
   UploadedAttachment
@@ -18,7 +21,12 @@ const api: HarmonyApi = {
   sendMessage: (
     channelId: string,
     content: string,
-    opts?: { replyToId?: string; pingReply?: boolean; attachments?: UploadedAttachment[] }
+    opts?: {
+      replyToId?: string
+      pingReply?: boolean
+      attachments?: UploadedAttachment[]
+      stickerIds?: string[]
+    }
   ) => ipcRenderer.invoke('harmony:sendMessage', channelId, content, opts),
   editMessage: (channelId: string, messageId: string, content: string) =>
     ipcRenderer.invoke('harmony:editMessage', channelId, messageId, content),
@@ -28,6 +36,25 @@ const api: HarmonyApi = {
     ipcRenderer.invoke('harmony:react', channelId, messageId, emoji, add),
   reactionUsers: (channelId: string, messageId: string, emoji: string) =>
     ipcRenderer.invoke('harmony:reactionUsers', channelId, messageId, emoji),
+  search: (query: string, opts: SearchScopeOpts) =>
+    ipcRenderer.invoke('harmony:search', query, opts),
+  setMessageTriage: (
+    messageId: string,
+    patch: { resolved?: boolean; starred?: boolean; snoozeUntil?: number | null }
+  ) => ipcRenderer.invoke('harmony:setMessageTriage', messageId, patch),
+  backfillMentions: () => ipcRenderer.invoke('harmony:backfillMentions'),
+  backfillMyMessages: () => ipcRenderer.invoke('harmony:backfillMyMessages'),
+  addBookmark: (message: MessageRow, channelId: string) =>
+    ipcRenderer.invoke('harmony:addBookmark', message, channelId),
+  removeBookmark: (messageId: string) => ipcRenderer.invoke('harmony:removeBookmark', messageId),
+  updateBookmark: (messageId: string, patch: { note?: string | null; label?: string | null }) =>
+    ipcRenderer.invoke('harmony:updateBookmark', messageId, patch),
+  refreshBookmark: (messageId: string) => ipcRenderer.invoke('harmony:refreshBookmark', messageId),
+  onBackfill: (cb: (p: BackfillProgress) => void) => {
+    const listener = (_e: unknown, p: BackfillProgress) => cb(p)
+    ipcRenderer.on('harmony:backfill', listener)
+    return () => ipcRenderer.removeListener('harmony:backfill', listener)
+  },
   ackChannel: (channelId: string, messageId: string) =>
     ipcRenderer.invoke('harmony:ackChannel', channelId, messageId),
   setMuted: (target: { guildId?: string; channelId?: string }, muted: boolean) =>
@@ -38,6 +65,15 @@ const api: HarmonyApi = {
     file: { name: string; type: string; bytes: Uint8Array }
   ) => ipcRenderer.invoke('harmony:uploadAttachment', channelId, file),
   getThreads: (channelId: string) => ipcRenderer.invoke('harmony:getThreads', channelId),
+  getGuildAssets: (guildId: string) => ipcRenderer.invoke('harmony:getGuildAssets', guildId),
+  searchGifs: (query: string) => ipcRenderer.invoke('harmony:searchGifs', query),
+  renameThread: (channelId: string, name: string) =>
+    ipcRenderer.invoke('harmony:renameThread', channelId, name),
+  setThreadArchived: (channelId: string, archived: boolean) =>
+    ipcRenderer.invoke('harmony:setThreadArchived', channelId, archived),
+  leaveThread: (channelId: string) => ipcRenderer.invoke('harmony:leaveThread', channelId),
+  setChannelNotifyLevel: (target: { guildId?: string; channelId: string }, level: 0 | 1 | 2 | 3) =>
+    ipcRenderer.invoke('harmony:setChannelNotifyLevel', target, level),
   onState: (cb: (state: UnifiedState) => void) => {
     const listener = (_e: unknown, state: UnifiedState) => cb(state)
     ipcRenderer.on('harmony:state', listener)
